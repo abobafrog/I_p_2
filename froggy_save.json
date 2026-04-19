@@ -1,0 +1,35 @@
+{
+  "coins": 0,
+  "inventory": [
+    "default"
+  ],
+  "active_skin": "default",
+  "Python": {
+    "Easy": {
+      "level": 0,
+      "task": 0
+    },
+    "Medium": {
+      "level": 0,
+      "task": 0
+    },
+    "Hard": {
+      "level": 0,
+      "task": 0
+    }
+  },
+  "JavaScript": {
+    "Easy": {
+      "level": 0,
+      "task": 0
+    },
+    "Medium": {
+      "level": 0,
+      "task": 0
+    },
+    "Hard": {
+      "level": 0,
+      "task": 0
+    }
+  }
+}
