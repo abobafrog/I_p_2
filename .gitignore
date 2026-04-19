@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vite/
+.DS_Store
+__pycache__/
+.pycache/
+.venv/
+data/
+*.db
+*.sqlite3
