@@ -3,6 +3,20 @@ import json
 import sys
 import math
 import os
+import re
+
+SMART_QUOTES_TRANSLATION = str.maketrans(
+    {
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "`": "'",
+        "´": "'",
+        "“": '"',
+        "”": '"',
+        "„": '"',
+    }
+)
 
 # --- КОНФИГУРАЦИЯ ---
 WIDTH, HEIGHT = 1000, 700
@@ -480,7 +494,11 @@ class Game:
         """Нормализация: убираем крайние пробелы + схлопываем любые пробелы/переносы."""
         s = (s or "").strip()
         s = " ".join(s.split())  # превращает \n и множественные пробелы в один пробел
-        return s
+        return s.lower().translate(SMART_QUOTES_TRANSLATION)
+
+    def _norm_code(self, s: str) -> str:
+        """Для кодовых ответов игнорируем пробелы вокруг пунктуации."""
+        return re.sub(r"\s*([,.\[\]\(\)\{\}:+\-*/%=<>])\s*", r"\1", self._norm(s))
 
     def _is_correct(self, q: dict, user_ans: str) -> bool:
         """Поддерживает ans как строку или список строк."""
@@ -490,8 +508,9 @@ class Game:
         # input
         answers = q["ans"] if isinstance(q.get("ans"), list) else [q.get("ans", "")]
         ua = self._norm(user_ans)
+        ua_code = self._norm_code(user_ans)
         for a in answers:
-            if ua == self._norm(a):
+            if ua == self._norm(a) or ua_code == self._norm_code(a):
                 return True
         return False
 

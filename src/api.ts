@@ -1,13 +1,22 @@
 import type {
+  AccountUpdatePayload,
   AdminQuestion,
   AdminQuestionPayload,
   AnswerResult,
   AuthResponse,
   BootstrapResponse,
   Credentials,
+  LeaderboardMetric,
   LeaderboardResponse,
+  ProgressListResponse,
+  PromoRedeemPayload,
+  PromoRedeemResponse,
   Progress,
+  RouteListResponse,
+  SelectLevelPayload,
+  ShopResponse,
   SubmitAnswerPayload,
+  TopicPayload,
   User,
 } from "./types";
 
@@ -22,6 +31,50 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
   }
+}
+
+function formatApiDetail(detail: unknown): string | null {
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => formatApiDetail(item))
+      .filter((item): item is string => Boolean(item));
+
+    return messages.length > 0 ? messages.join(" | ") : null;
+  }
+
+  if (detail && typeof detail === "object") {
+    const detailRecord = detail as {
+      msg?: unknown;
+      detail?: unknown;
+      loc?: unknown;
+    };
+
+    if (typeof detailRecord.msg === "string") {
+      const location = Array.isArray(detailRecord.loc)
+        ? detailRecord.loc
+            .slice(1)
+            .map((item) => String(item))
+            .join(".")
+        : "";
+      return location ? `${location}: ${detailRecord.msg}` : detailRecord.msg;
+    }
+
+    if ("detail" in detailRecord) {
+      return formatApiDetail(detailRecord.detail);
+    }
+
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return String(detail);
+    }
+  }
+
+  return null;
 }
 
 function buildHeaders(token?: string, extra?: HeadersInit) {
@@ -45,9 +98,10 @@ async function request<T>(path: string, init?: RequestInit, token?: string): Pro
     let message = "Произошла ошибка запроса";
 
     try {
-      const errorBody = (await response.json()) as { detail?: string };
-      if (errorBody.detail) {
-        message = errorBody.detail;
+      const errorBody = (await response.json()) as { detail?: unknown };
+      const formattedDetail = formatApiDetail(errorBody.detail);
+      if (formattedDetail) {
+        message = formattedDetail;
       }
     } catch {
       message = response.statusText || message;
@@ -93,8 +147,27 @@ export function getMe(token: string) {
   return request<User>("/auth/me", undefined, token);
 }
 
+export function updateProfile(token: string, payload: AccountUpdatePayload) {
+  return request<User>(
+    "/auth/profile",
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+    token,
+  );
+}
+
 export function logout(token: string) {
   return request<void>("/auth/logout", { method: "POST" }, token);
+}
+
+export function getRoutes(token: string) {
+  return request<RouteListResponse>("/game/routes", undefined, token);
+}
+
+export function getAllProgress(token: string) {
+  return request<ProgressListResponse>("/game/progress", undefined, token);
 }
 
 export function getBootstrap(token: string, topic: string) {
@@ -113,6 +186,36 @@ export function resetProgress(token: string, topic: string) {
   );
 }
 
+export function resetAllProgress(token: string) {
+  return request<ProgressListResponse>(
+    "/game/reset-all",
+    { method: "POST" },
+    token,
+  );
+}
+
+export function selectLevel(token: string, payload: SelectLevelPayload) {
+  return request<Progress>(
+    "/game/select-level",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    token,
+  );
+}
+
+export function resetLevel(token: string, payload: TopicPayload) {
+  return request<Progress>(
+    "/game/reset-level",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    token,
+  );
+}
+
 export function submitAnswer(token: string, payload: SubmitAnswerPayload) {
   return request<AnswerResult>(
     "/game/submit-answer",
@@ -124,9 +227,32 @@ export function submitAnswer(token: string, payload: SubmitAnswerPayload) {
   );
 }
 
-export function getLeaderboard(topic: string) {
+export function getLeaderboard(topic: string, metric: LeaderboardMetric = "best_score") {
   return request<LeaderboardResponse>(
-    `/leaderboard?topic=${encodeURIComponent(topic)}`,
+    `/leaderboard?topic=${encodeURIComponent(topic)}&metric=${encodeURIComponent(metric)}`,
+  );
+}
+
+export function getShop(token: string) {
+  return request<ShopResponse>("/shop", undefined, token);
+}
+
+export function buyOrEquipShopItem(token: string, itemId: string) {
+  return request<ShopResponse>(
+    `/shop/items/${encodeURIComponent(itemId)}`,
+    { method: "POST" },
+    token,
+  );
+}
+
+export function redeemPromoCode(token: string, payload: PromoRedeemPayload) {
+  return request<PromoRedeemResponse>(
+    "/auth/redeem-promo",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    token,
   );
 }
 

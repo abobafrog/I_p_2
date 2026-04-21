@@ -8,7 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlite3 import Connection
 
-from backend.db import delete_expired_sessions, get_db, get_session_user
+from backend.db import delete_expired_sessions, get_db, get_session_user, serialize_user_row
 
 
 SESSION_DAYS = 30
@@ -60,11 +60,7 @@ def require_user(
             detail="Сессия истекла или токен неверный.",
         )
 
-    return {
-        "id": user["id"],
-        "username": user["username"],
-        "is_admin": bool(user["is_admin"]),
-    }
+    return serialize_user_row(user)
 
 
 def require_admin(user: dict = Depends(require_user)) -> dict:

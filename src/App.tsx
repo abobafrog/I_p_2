@@ -5,65 +5,108 @@ import swampBackdrop from "../swamp_bg.png";
 import winBackdrop from "../win.jpg";
 import {
   ApiError,
+  buyOrEquipShopItem,
   clearStoredToken,
   createAdminQuestion,
   deleteAdminQuestion,
+  getAllProgress,
   getAdminQuestions,
   getBootstrap,
   getLeaderboard,
+  getMe,
+  getRoutes,
+  getShop,
   loadStoredToken,
   login,
   logout,
   persistToken,
+  redeemPromoCode,
   register,
+  resetAllProgress,
+  resetLevel,
   resetProgress,
+  selectLevel,
   submitAnswer,
+  updateProfile,
   updateAdminQuestion,
 } from "./api";
 import type {
+  AccountUpdatePayload,
   AdminQuestion,
   AdminQuestionPayload,
   AnswerResult,
   AuthResponse,
   Credentials,
+  LeaderboardMetric,
   LeaderboardEntry,
   Progress,
+  PromoRedeemPayload,
   Question,
   QuestionDraft,
+  RouteOption,
+  ShopItem,
   User,
 } from "./types";
 
-type View = "auth" | "dashboard" | "quiz" | "leaderboard" | "admin" | "result";
+type View =
+  | "auth"
+  | "menu"
+  | "difficulty"
+  | "quiz"
+  | "shop"
+  | "account"
+  | "leaderboard"
+  | "admin"
+  | "result";
 type AuthMode = "login" | "register";
+type FeedbackAction = "advance" | "retry" | "level-reset" | null;
+type AccountFormState = {
+  displayName: string;
+  currentPassword: string;
+  newPassword: string;
+  confirmPassword: string;
+};
 
 type RoundResult = {
   finalScore: number;
   totalQuestions: number;
   bestScore: number;
+  completedRuns: number;
+  routeTitle: string;
 };
 
-const TOPIC = "python";
+const DEFAULT_TOPIC = "python-easy";
+const HEARTS_PER_LEVEL = 3;
 const APP_TITLE = "Froggy Coder";
 const AUTH_SCENE_STYLE: CSSProperties = {
-  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.18), rgba(8, 18, 14, 0.72)), url(${bolotoBackdrop})`,
+  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.18), rgba(8, 18, 14, 0.74)), url(${bolotoBackdrop})`,
 };
-const DASHBOARD_SCENE_STYLE: CSSProperties = {
-  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.1), rgba(8, 18, 14, 0.72)), url(${swampBackdrop})`,
+const MENU_SCENE_STYLE: CSSProperties = {
+  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.16), rgba(8, 18, 14, 0.76)), url(${swampBackdrop})`,
 };
 const RESULT_SCENE_STYLE: CSSProperties = {
-  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.1), rgba(8, 18, 14, 0.68)), url(${winBackdrop})`,
+  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.12), rgba(8, 18, 14, 0.68)), url(${winBackdrop})`,
 };
 
-function createEmptyDraft(): QuestionDraft {
+function createEmptyDraft(topic = DEFAULT_TOPIC): QuestionDraft {
   return {
-    topic: TOPIC,
+    topic,
     type: "choice",
     prompt: "",
     explanation: "",
     placeholder: "",
     order_index: "0",
-    options_text: "Ответ 1\nОтвет 2",
-    answers_text: "Ответ 1",
+    options_text: "Вариант 1\nВариант 2",
+    answers_text: "Вариант 1",
+  };
+}
+
+function createEmptyAccountForm(activeUser: User | null = null): AccountFormState {
+  return {
+    displayName: activeUser?.username ?? "",
+    currentPassword: "",
+    newPassword: "",
+    confirmPassword: "",
   };
 }
 
@@ -73,7 +116,7 @@ function normalizeWhitespace(value: string) {
 
 function formatDate(value: string | null) {
   if (!value) {
-    return "еще нет";
+    return "нет данных";
   }
 
   const date = new Date(value);
@@ -90,27 +133,339 @@ function formatDate(value: string | null) {
   });
 }
 
+function getRouteTitle(route: RouteOption | null) {
+  if (!route) {
+    return "Маршрут не выбран";
+  }
+
+  return `${route.language} • ${route.difficulty_label}`;
+}
+
+function getRouteTaskSummary(route: RouteOption) {
+  return `${route.levels_total} уровней по ${route.tasks_per_level} задач`;
+}
+
+function getRouteContentHint(route: RouteOption) {
+  return getRouteTaskSummary(route);
+}
+
+function getUserHandle(entity: Pick<User, "full_username" | "username" | "tag">) {
+  return entity.full_username || (entity.tag ? `${entity.username}#${entity.tag}` : entity.username);
+}
+
+function getLeaderboardHandle(
+  entry: Pick<LeaderboardEntry, "full_username" | "username" | "tag">,
+) {
+  return entry.full_username || (entry.tag ? `${entry.username}#${entry.tag}` : entry.username);
+}
+
+function getUniqueLanguages(routes: RouteOption[]) {
+  return Array.from(new Set(routes.map((route) => route.language)));
+}
+
+function getLevelHeartsKey(topic: string, levelIndex: number) {
+  return `${topic}:${levelIndex}`;
+}
+
+type PrimitiveFrogProps = {
+  size?: number;
+  color?: string;
+  hasBow?: boolean;
+  hasTie?: boolean;
+  smaller?: boolean;
+  accessory?: string | null;
+  containAccessory?: boolean;
+  className?: string;
+};
+
+function PrimitiveFrog({
+  size = 120,
+  color = "#32c832",
+  hasBow = false,
+  hasTie = false,
+  smaller = false,
+  accessory = null,
+  containAccessory = false,
+  className,
+}: PrimitiveFrogProps) {
+  const bw = size * 0.625;
+  const bh = size * 0.4375;
+  const bx = size * 0.125;
+  const by = size * 0.3125;
+  const hr = size * 0.225;
+  const hx = size * 0.6875;
+  const hy = size * 0.375;
+  const eyeR = hr * 0.33;
+  const eyeX = hx + hr * 0.28;
+  const eyeY = hy - hr * 0.28;
+  const legOne = { x: size * 0.0625, y: size * 0.5625, w: size * 0.3125, h: size * 0.1875 };
+  const legTwo = { x: size * 0.5625, y: size * 0.5625, w: size * 0.25, h: size * 0.125 };
+  const showBow = hasBow || accessory === "swamp_bow";
+  const bowSize = smaller ? size * 0.1 : size * 0.15;
+  const bowX = hx - hr * 0.5;
+  const bowY = hy - hr * 0.78;
+  const tieSize = smaller ? size * 0.08 : size * 0.12;
+  const tieX = hx;
+  const tieY = hy + hr - hr * 0.3;
+  const showCylinder = accessory === "cylinder";
+  const showCrown = accessory === "lotus_crown";
+  const accessoryPadding =
+    containAccessory && showCrown
+      ? {
+          top: size * 0.22,
+          right: size * 0.1,
+          bottom: size * 0.1,
+          left: size * 0.1,
+        }
+      : containAccessory && showCylinder
+        ? {
+            top: size * 0.2,
+            right: size * 0.1,
+            bottom: size * 0.1,
+            left: size * 0.1,
+          }
+        : { top: 0, right: 0, bottom: 0, left: 0 };
+  const viewBoxX = -accessoryPadding.left;
+  const viewBoxY = -accessoryPadding.top;
+  const viewBoxWidth = size + accessoryPadding.left + accessoryPadding.right;
+  const viewBoxHeight = size + accessoryPadding.top + accessoryPadding.bottom;
+  const hatWidth = size * 0.4;
+  const hatHeight = size * 0.34;
+  const brimWidth = size * 0.54;
+  const brimHeight = Math.max(6, size * 0.05);
+  const brimY = hy - hr * (showCylinder ? 1.14 : 0.96);
+  const hatTop = brimY - hatHeight + size * (showCylinder ? 0.08 : 0.1);
+  const crownBaseY = hy - hr * 0.96;
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`${viewBoxX} ${viewBoxY} ${viewBoxWidth} ${viewBoxHeight}`}
+      preserveAspectRatio="xMidYMid meet"
+      className={className}
+      aria-hidden="true"
+    >
+      <g>
+        <ellipse
+          cx={legOne.x + legOne.w / 2}
+          cy={legOne.y + legOne.h / 2}
+          rx={legOne.w / 2}
+          ry={legOne.h / 2}
+          fill="#228b22"
+        />
+        <ellipse
+          cx={legTwo.x + legTwo.w / 2}
+          cy={legTwo.y + legTwo.h / 2}
+          rx={legTwo.w / 2}
+          ry={legTwo.h / 2}
+          fill="#228b22"
+        />
+        <ellipse cx={bx + bw / 2} cy={by + bh / 2} rx={bw / 2} ry={bh / 2} fill={color} />
+        <circle cx={hx} cy={hy} r={hr} fill={color} />
+        <circle cx={eyeX} cy={eyeY} r={eyeR} fill="#ffffff" />
+        <circle cx={eyeX + 2} cy={eyeY} r={eyeR * 0.5} fill="#111111" />
+
+        {showCylinder && (
+          <>
+            <rect
+              x={hx - brimWidth / 2}
+              y={brimY}
+              width={brimWidth}
+              height={brimHeight}
+              rx={brimHeight / 2}
+              fill="#111111"
+            />
+            <rect
+              x={hx - hatWidth / 2}
+              y={hatTop}
+              width={hatWidth}
+              height={hatHeight}
+              rx={size * 0.03}
+              fill="#111111"
+            />
+            <rect
+              x={hx - hatWidth / 2}
+              y={hatTop + hatHeight * 0.6}
+              width={hatWidth}
+              height={Math.max(6, size * 0.05)}
+              fill="#d4a017"
+            />
+          </>
+        )}
+
+        {showCrown && (
+          <>
+            <ellipse
+              cx={hx - size * 0.12}
+              cy={crownBaseY - size * 0.09}
+              rx={size * 0.07}
+              ry={size * 0.13}
+              fill="#ffd6e9"
+              transform={`rotate(-28 ${hx - size * 0.12} ${crownBaseY - size * 0.09})`}
+            />
+            <ellipse
+              cx={hx - size * 0.04}
+              cy={crownBaseY - size * 0.14}
+              rx={size * 0.075}
+              ry={size * 0.16}
+              fill="#fff2fb"
+              transform={`rotate(-12 ${hx - size * 0.04} ${crownBaseY - size * 0.14})`}
+            />
+            <ellipse
+              cx={hx}
+              cy={crownBaseY - size * 0.17}
+              rx={size * 0.08}
+              ry={size * 0.18}
+              fill="#ffd1ef"
+            />
+            <ellipse
+              cx={hx + size * 0.04}
+              cy={crownBaseY - size * 0.14}
+              rx={size * 0.075}
+              ry={size * 0.16}
+              fill="#fff2fb"
+              transform={`rotate(12 ${hx + size * 0.04} ${crownBaseY - size * 0.14})`}
+            />
+            <ellipse
+              cx={hx + size * 0.12}
+              cy={crownBaseY - size * 0.09}
+              rx={size * 0.07}
+              ry={size * 0.13}
+              fill="#ffd6e9"
+              transform={`rotate(28 ${hx + size * 0.12} ${crownBaseY - size * 0.09})`}
+            />
+            <circle cx={hx} cy={crownBaseY - size * 0.11} r={size * 0.035} fill="#ffb4d9" />
+            <rect
+              x={hx - size * 0.17}
+              y={crownBaseY - size * 0.01}
+              width={size * 0.34}
+              height={Math.max(6, size * 0.045)}
+              rx={size * 0.025}
+              fill="#f4d77d"
+            />
+            <circle cx={hx - size * 0.11} cy={crownBaseY + size * 0.01} r={size * 0.018} fill="#f8f1b4" />
+            <circle cx={hx + size * 0.11} cy={crownBaseY + size * 0.01} r={size * 0.018} fill="#f8f1b4" />
+          </>
+        )}
+
+        {showBow && (
+          <>
+            <circle cx={bowX - bowSize / 2} cy={bowY} r={bowSize / 2} fill="#ffc0cb" />
+            <circle cx={bowX + bowSize / 2} cy={bowY} r={bowSize / 2} fill="#ffc0cb" />
+            <circle cx={bowX} cy={bowY} r={bowSize / 3} fill="#dc3232" />
+          </>
+        )}
+
+        {hasTie && (
+          <>
+            <polygon
+              points={`${tieX - tieSize / 4},${tieY} ${tieX - tieSize},${tieY - tieSize / 2} ${tieX - tieSize},${tieY + tieSize / 2}`}
+              fill="#6495ed"
+            />
+            <polygon
+              points={`${tieX + tieSize / 4},${tieY} ${tieX + tieSize},${tieY - tieSize / 2} ${tieX + tieSize},${tieY + tieSize / 2}`}
+              fill="#6495ed"
+            />
+            <circle cx={tieX} cy={tieY} r={tieSize / 4} fill="#dc3232" />
+          </>
+        )}
+      </g>
+    </svg>
+  );
+}
+
+type FrogAvatarProps = {
+  accessory?: string | null;
+  className?: string;
+  frogClassName?: string;
+  frogSize?: number;
+};
+
+function FrogAvatar({
+  accessory = null,
+  className,
+  frogClassName,
+  frogSize = 48,
+}: FrogAvatarProps) {
+  return (
+    <span className={className} aria-hidden="true">
+      <PrimitiveFrog
+        size={frogSize}
+        color="#32c832"
+        accessory={accessory}
+        containAccessory
+        className={frogClassName}
+      />
+    </span>
+  );
+}
+
+function FrogFamily() {
+  const frogs = [
+    { size: 88, color: "#32c832", hasTie: true },
+    { size: 88, color: "#64c864", hasBow: true },
+    { size: 64, color: "#96dc96", hasBow: true, smaller: true },
+    { size: 60, color: "#50b450", hasTie: true, smaller: true },
+  ] as const;
+
+  return (
+    <div className="frog-family" aria-hidden="true">
+      {frogs.map((frog, index) => (
+        <span
+          key={`${frog.size}-${frog.color}-${index}`}
+          className="frog-family__member"
+          style={{ width: frog.size, minHeight: 104 }}
+        >
+          <PrimitiveFrog {...frog} />
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function App() {
   const [view, setView] = useState<View>("auth");
   const [authMode, setAuthMode] = useState<AuthMode>("register");
   const [token, setToken] = useState<string | null>(() => loadStoredToken());
 
   const [user, setUser] = useState<User | null>(null);
+  const [routes, setRoutes] = useState<RouteOption[]>([]);
+  const [currentRoute, setCurrentRoute] = useState<RouteOption | null>(null);
+  const [selectedLanguage, setSelectedLanguage] = useState("Python");
+  const [accountRouteTopic, setAccountRouteTopic] = useState<string | null>(null);
+
   const [questions, setQuestions] = useState<Question[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
+  const [routeProgressCache, setRouteProgressCache] = useState<Record<string, Progress>>({});
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [leaderboardMetric, setLeaderboardMetric] =
+    useState<LeaderboardMetric>("coins");
+  const [leaderboardMetricLabel, setLeaderboardMetricLabel] =
+    useState("Монеты");
+  const [leaderboardScope, setLeaderboardScope] = useState<"route" | "global">("global");
+  const [shopItems, setShopItems] = useState<ShopItem[]>([]);
   const [adminQuestions, setAdminQuestions] = useState<AdminQuestion[]>([]);
+  const [selectedAdminQuestionId, setSelectedAdminQuestionId] = useState<number | null>(null);
 
   const [authForm, setAuthForm] = useState<Credentials>({
     username: "",
     password: "",
   });
+  const [accountForm, setAccountForm] = useState<AccountFormState>(() =>
+    createEmptyAccountForm(),
+  );
+  const [promoCode, setPromoCode] = useState("");
 
   const [selectedOption, setSelectedOption] = useState("");
   const [typedAnswer, setTypedAnswer] = useState("");
   const [feedback, setFeedback] = useState<AnswerResult | null>(null);
+  const [feedbackAction, setFeedbackAction] = useState<FeedbackAction>(null);
   const [pendingProgress, setPendingProgress] = useState<Progress | null>(null);
   const [displayIndex, setDisplayIndex] = useState(0);
+  const [hearts, setHearts] = useState(HEARTS_PER_LEVEL);
+  const [levelHearts, setLevelHearts] = useState<Record<string, number>>({});
+  const [showHint, setShowHint] = useState(false);
   const [roundResult, setRoundResult] = useState<RoundResult | null>(null);
 
   const [draft, setDraft] = useState<QuestionDraft>(() => createEmptyDraft());
@@ -120,7 +475,13 @@ function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
+  const languageOptions = getUniqueLanguages(routes);
+  const difficultyOptions = routes.filter((route) => route.language === selectedLanguage);
   const currentQuestion = questions[displayIndex] ?? null;
+  const selectedAdminQuestion =
+    adminQuestions.find((question) => question.id === selectedAdminQuestionId) ??
+    adminQuestions[0] ??
+    null;
   const currentAnswer =
     currentQuestion?.type === "choice" ? selectedOption : typedAnswer;
   const canSubmitAnswer =
@@ -129,75 +490,98 @@ function App() {
     feedback === null &&
     busyLabel.length === 0;
 
-  const displayedScore =
-    progress === null
-      ? 0
-      : progress.current_score + (feedback?.is_correct ? 1 : 0);
-
   useEffect(() => {
     if (token) {
-      void hydrateSession(token, "dashboard");
+      void hydrateSession(token, "menu");
     }
   }, []);
 
-  async function hydrateSession(activeToken: string, nextView: View = "dashboard") {
-    setBusyLabel("Поднимаем серверное болото...");
-    setErrorMessage("");
+  function rememberProgress(nextProgress: Progress) {
+    setRouteProgressCache((prev) => ({
+      ...prev,
+      [nextProgress.topic]: nextProgress,
+    }));
+  }
 
-    try {
-      const bootstrap = await getBootstrap(activeToken, TOPIC);
-      const leaderboardResponse = await getLeaderboard(TOPIC);
+  function replaceProgressCache(progressItems: Progress[]) {
+    setRouteProgressCache(
+      progressItems.reduce<Record<string, Progress>>((accumulator, item) => {
+        accumulator[item.topic] = item;
+        return accumulator;
+      }, {}),
+    );
+  }
 
-      setUser(bootstrap.user);
-      setQuestions(bootstrap.questions);
-      setProgress(bootstrap.progress);
-      setLeaderboard(leaderboardResponse.entries);
-      setDisplayIndex(bootstrap.progress.current_index);
+  function getStoredHearts(topic: string, levelIndex: number, fallback = HEARTS_PER_LEVEL) {
+    return levelHearts[getLevelHeartsKey(topic, levelIndex)] ?? fallback;
+  }
 
-      if (bootstrap.user.is_admin) {
-        const adminData = await getAdminQuestions(activeToken, TOPIC);
-        setAdminQuestions(adminData);
-      } else {
-        setAdminQuestions([]);
-      }
+  function syncLevelHearts(topic: string, levelIndex: number, nextHearts: number) {
+    const key = getLevelHeartsKey(topic, levelIndex);
+    setLevelHearts((prev) => ({
+      ...prev,
+      [key]: nextHearts,
+    }));
+    setHearts(nextHearts);
+  }
 
-      setView(nextView);
-    } catch (error) {
-      handleApiFailure(error, true);
-    } finally {
-      setBusyLabel("");
-    }
+  function clearRouteHearts(topic: string) {
+    const prefix = `${topic}:`;
+    setLevelHearts((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).filter(([key]) => !key.startsWith(prefix)),
+      ),
+    );
   }
 
   function resetQuestionUi() {
     setSelectedOption("");
     setTypedAnswer("");
     setFeedback(null);
+    setFeedbackAction(null);
     setPendingProgress(null);
   }
 
-  function resetDraftForm() {
-    setDraft(createEmptyDraft());
+  function resetDraftForm(topic = currentRoute?.topic ?? routes[0]?.topic ?? DEFAULT_TOPIC) {
+    setDraft(createEmptyDraft(topic));
     setEditingQuestionId(null);
+  }
+
+  function resetAccountForm(activeUser: User | null = user) {
+    setAccountForm(createEmptyAccountForm(activeUser));
   }
 
   function storeSession(authResponse: AuthResponse) {
     persistToken(authResponse.token);
     setToken(authResponse.token);
     setUser(authResponse.user);
+    resetAccountForm(authResponse.user);
   }
 
   function clearSession() {
     clearStoredToken();
     setToken(null);
     setUser(null);
+    setRoutes([]);
+    setCurrentRoute(null);
+    setAccountRouteTopic(null);
     setQuestions([]);
     setProgress(null);
+    setRouteProgressCache({});
     setLeaderboard([]);
+    setLeaderboardMetric("coins");
+    setLeaderboardMetricLabel("Монеты");
+    setLeaderboardScope("global");
+    setShopItems([]);
     setAdminQuestions([]);
     setRoundResult(null);
+    setHearts(HEARTS_PER_LEVEL);
+    setLevelHearts({});
+    setShowHint(false);
     resetQuestionUi();
-    resetDraftForm();
+    resetDraftForm(DEFAULT_TOPIC);
+    resetAccountForm(null);
+    setPromoCode("");
     setView("auth");
   }
 
@@ -210,12 +594,95 @@ function App() {
       return;
     }
 
-    setErrorMessage("Произошла непредвиденная ошибка.");
+    setErrorMessage("Произошла ошибка. Попробуйте еще раз.");
+  }
+
+  async function hydrateSession(activeToken: string, nextView: View = "menu") {
+    setBusyLabel("Загружаем профиль...");
+    setErrorMessage("");
+
+    try {
+      const [me, routeResponse, progressResponse] = await Promise.all([
+        getMe(activeToken),
+        getRoutes(activeToken),
+        getAllProgress(activeToken),
+      ]);
+
+      setUser(me);
+      resetAccountForm(me);
+      setRoutes(routeResponse.items);
+      replaceProgressCache(progressResponse.items);
+      setAccountRouteTopic((prev) =>
+        routeResponse.items.some((route) => route.topic === prev)
+          ? prev
+          : routeResponse.items[0]?.topic ?? null,
+      );
+      setSelectedLanguage(routeResponse.items[0]?.language ?? "Python");
+      setDraft((prev) =>
+        routeResponse.items.some((route) => route.topic === prev.topic)
+          ? prev
+          : createEmptyDraft(routeResponse.items[0]?.topic ?? DEFAULT_TOPIC),
+      );
+      setView(nextView);
+    } catch (error) {
+      handleApiFailure(error, true);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function loadRoute(route: RouteOption, nextView: View = "difficulty") {
+    if (!token) {
+      return false;
+    }
+
+    setBusyLabel("Загружаем маршрут...");
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const [bootstrap, leaderboardResponse] = await Promise.all([
+        getBootstrap(token, route.topic),
+        getLeaderboard(route.topic, leaderboardMetric),
+      ]);
+
+      setCurrentRoute(route);
+      setAccountRouteTopic(route.topic);
+      setSelectedLanguage(route.language);
+      setQuestions(bootstrap.questions);
+      setProgress(bootstrap.progress);
+      setUser(bootstrap.user);
+      setLeaderboard(leaderboardResponse.entries);
+      setLeaderboardMetric(leaderboardResponse.metric);
+      setLeaderboardMetricLabel(leaderboardResponse.metric_label);
+      setLeaderboardScope(leaderboardResponse.scope);
+      setDisplayIndex(bootstrap.progress.current_index);
+      syncLevelHearts(
+        route.topic,
+        bootstrap.progress.current_level_index,
+        getStoredHearts(
+          route.topic,
+          bootstrap.progress.current_level_index,
+          bootstrap.progress.remaining_hearts,
+        ),
+      );
+      setShowHint(false);
+      setRoundResult(null);
+      rememberProgress(bootstrap.progress);
+      resetQuestionUi();
+      setView(nextView);
+      return true;
+    } catch (error) {
+      handleApiFailure(error);
+      return false;
+    } finally {
+      setBusyLabel("");
+    }
   }
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusyLabel(authMode === "login" ? "Входим в болото..." : "Создаем аккаунт...");
+    setBusyLabel(authMode === "login" ? "Выполняем вход..." : "Создаем аккаунт...");
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -232,10 +699,10 @@ function App() {
       setAuthForm({ username: "", password: "" });
       setSuccessMessage(
         authMode === "login"
-          ? "С возвращением в Froggy Coder."
-          : "Аккаунт создан. Теперь прогресс будет храниться на сервере.",
+          ? "Вход выполнен. Можно продолжать обучение."
+          : `Аккаунт создан. Для входа используйте логин ${response.user.full_username}.`,
       );
-      await hydrateSession(response.token, "dashboard");
+      await hydrateSession(response.token, "menu");
     } catch (error) {
       handleApiFailure(error);
     } finally {
@@ -255,45 +722,91 @@ function App() {
     try {
       await logout(token);
     } catch {
-      // Ignore logout transport errors and still clear the local session.
+      // Игнорируем сетевые ошибки logout и все равно чистим локальную сессию.
     } finally {
       clearSession();
       setBusyLabel("");
     }
   }
 
-  async function refreshLeaderboard() {
-    try {
-      const response = await getLeaderboard(TOPIC);
-      setLeaderboard(response.entries);
-    } catch (error) {
-      handleApiFailure(error);
+  async function refreshLeaderboard(
+    topicOverride?: string,
+    metricOverride?: LeaderboardMetric,
+  ) {
+    const topic = topicOverride ?? currentRoute?.topic ?? routes[0]?.topic;
+    if (!topic) {
+      return;
     }
+
+    const response = await getLeaderboard(topic, metricOverride ?? leaderboardMetric);
+    setLeaderboard(response.entries);
+    setLeaderboardMetric(response.metric);
+    setLeaderboardMetricLabel(response.metric_label);
+    setLeaderboardScope(response.scope);
   }
 
-  async function openLeaderboard() {
-    setBusyLabel("Обновляем таблицу лидеров...");
+  async function openLeaderboard(
+    topicOverride?: string,
+    metricOverride?: LeaderboardMetric,
+  ) {
+    const route =
+      routes.find((item) => item.topic === topicOverride) ??
+      currentRoute ??
+      routes[0] ??
+      null;
+
+    if (!route) {
+      return;
+    }
+
+    setBusyLabel("Загружаем таблицу лидеров...");
     setErrorMessage("");
 
     try {
-      await refreshLeaderboard();
+      await refreshLeaderboard(route.topic, metricOverride);
+      setCurrentRoute(route);
       setView("leaderboard");
+    } catch (error) {
+      handleApiFailure(error);
     } finally {
       setBusyLabel("");
     }
   }
 
-  async function openAdmin() {
+  async function openAdmin(topicOverride?: string) {
     if (!token || !user?.is_admin) {
       return;
     }
 
-    setBusyLabel("Открываем админку...");
+    setBusyLabel("Загружаем панель управления...");
     setErrorMessage("");
 
     try {
-      const data = await getAdminQuestions(token, TOPIC);
+      const routeResponse = await getRoutes(token);
+      const nextRoutes = routeResponse.items;
+      const route =
+        nextRoutes.find((item) => item.topic === topicOverride) ??
+        nextRoutes.find((item) => item.topic === currentRoute?.topic) ??
+        nextRoutes[0] ??
+        null;
+      const shouldResetForms =
+        Boolean(topicOverride) && topicOverride !== currentRoute?.topic;
+
+      if (!route) {
+        return;
+      }
+
+      const data = await getAdminQuestions(token, route.topic);
+      setRoutes(nextRoutes);
+      setCurrentRoute(route);
+      setSelectedLanguage(route.language);
       setAdminQuestions(data);
+      setSelectedAdminQuestionId((prev) =>
+        data.some((question) => question.id === prev) ? prev : (data[0]?.id ?? null),
+      );
+      setDraft((prev) =>
+        shouldResetForms || prev.topic !== route.topic ? createEmptyDraft(route.topic) : prev,
+      );
       setView("admin");
     } catch (error) {
       handleApiFailure(error);
@@ -302,24 +815,235 @@ function App() {
     }
   }
 
-  async function startRun(resetServerProgress = false) {
-    if (!token || !progress) {
+  async function handleAdminRouteChange(nextTopic: string) {
+    if (!user?.is_admin) {
+      return;
+    }
+    setDraft((prev) => ({ ...prev, topic: nextTopic }));
+    await openAdmin(nextTopic);
+  }
+
+  async function openShop() {
+    if (!token) {
       return;
     }
 
-    setBusyLabel(resetServerProgress ? "Готовим новый забег..." : "Прыгаем на маршрут...");
+    setBusyLabel("Загружаем магазин...");
+    setErrorMessage("");
+
+    try {
+      const response = await getShop(token);
+      setUser(response.user);
+      setShopItems(response.items);
+      if (response.message) {
+        setSuccessMessage(response.message);
+      }
+      setView("shop");
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  function openAccount() {
+    if (!user) {
+      return;
+    }
+
+    const fallbackRoute =
+      (currentRoute && currentRoute.language === selectedLanguage ? currentRoute : null) ??
+      routes.find((route) => route.language === selectedLanguage) ??
+      currentRoute ??
+      routes[0] ??
+      null;
+
+    setErrorMessage("");
+    setSuccessMessage("");
+    resetAccountForm(user);
+    if (fallbackRoute) {
+      setAccountRouteTopic(fallbackRoute.topic);
+    }
+    setView("account");
+  }
+
+  async function openAccountRoute(route: RouteOption | null) {
+    if (!route) {
+      return;
+    }
+
+    setSelectedLanguage(route.language);
+    setAccountRouteTopic(route.topic);
+
+    if (currentRoute?.topic === route.topic && progress?.topic === route.topic) {
+      setView("difficulty");
+      return;
+    }
+
+    await loadRoute(route, "difficulty");
+  }
+
+  async function handleAccountSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token || !user) {
+      return;
+    }
+
+    const displayName = accountForm.displayName.trim();
+    const currentPassword = accountForm.currentPassword.trim();
+    const newPassword = accountForm.newPassword.trim();
+    const confirmPassword = accountForm.confirmPassword.trim();
+
+    if (newPassword !== confirmPassword) {
+      setErrorMessage("Новый пароль и подтверждение должны совпадать.");
+      setSuccessMessage("");
+      return;
+    }
+
+    if (currentPassword && !newPassword) {
+      setErrorMessage("Чтобы сменить пароль, укажите новый пароль.");
+      setSuccessMessage("");
+      return;
+    }
+
+    setBusyLabel("Сохраняем профиль...");
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const payload: AccountUpdatePayload = {
+        display_name: displayName,
+      };
+
+      if (currentPassword) {
+        payload.current_password = currentPassword;
+      }
+
+      if (newPassword) {
+        payload.new_password = newPassword;
+      }
+
+      const nextUser = await updateProfile(token, payload);
+      setUser(nextUser);
+      resetAccountForm(nextUser);
+      setSuccessMessage("Профиль обновлен.");
+
+      if (currentRoute || leaderboard.length > 0) {
+        await refreshLeaderboard(currentRoute?.topic, leaderboardMetric);
+      }
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handlePromoSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token) {
+      return;
+    }
+
+    const code = promoCode.trim();
+    if (!code) {
+      setErrorMessage("Введите промокод.");
+      setSuccessMessage("");
+      return;
+    }
+
+    setBusyLabel("Проверяем промокод...");
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const payload: PromoRedeemPayload = { code };
+      const response = await redeemPromoCode(token, payload);
+      setUser(response.user);
+      replaceProgressCache(response.progresses);
+      if (currentRoute) {
+        const nextProgress =
+          response.progresses.find((item) => item.topic === currentRoute.topic) ?? null;
+        if (nextProgress) {
+          setProgress(nextProgress);
+          setDisplayIndex(nextProgress.current_index);
+        }
+      }
+      setPromoCode("");
+      setSuccessMessage(response.message);
+
+      if (leaderboardMetric === "coins") {
+        await refreshLeaderboard(undefined, "coins");
+      }
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleShopItemAction(itemId: string) {
+    if (!token) {
+      return;
+    }
+
+    setBusyLabel("Обновляем каталог предметов...");
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const response = await buyOrEquipShopItem(token, itemId);
+      setUser(response.user);
+      setShopItems(response.items);
+      setSuccessMessage(response.message ?? "Данные магазина обновлены.");
+
+      if (leaderboardMetric === "coins") {
+        await refreshLeaderboard(undefined, "coins");
+      }
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function chooseDifficulty(route: RouteOption) {
+    await loadRoute(route, "difficulty");
+  }
+
+  async function startLevel(levelIndex: number) {
+    if (!token || !progress || !currentRoute) {
+      return;
+    }
+
+    setBusyLabel("Подготавливаем уровень...");
     setErrorMessage("");
     setSuccessMessage("");
 
     try {
       let nextProgress = progress;
 
-      if (resetServerProgress) {
-        nextProgress = await resetProgress(token, TOPIC);
+      if (levelIndex !== progress.current_level_index) {
+        nextProgress = await selectLevel(token, {
+          topic: currentRoute.topic,
+          level_index: levelIndex,
+        });
         setProgress(nextProgress);
+        rememberProgress(nextProgress);
       }
 
+      const isContinuingCurrentLevel =
+        levelIndex === progress.current_level_index && progress.current_task_index > 0;
+      const nextHearts = isContinuingCurrentLevel
+        ? getStoredHearts(
+            currentRoute.topic,
+            nextProgress.current_level_index,
+            nextProgress.remaining_hearts,
+          )
+        : HEARTS_PER_LEVEL;
+
       setDisplayIndex(nextProgress.current_index);
+      syncLevelHearts(currentRoute.topic, nextProgress.current_level_index, nextHearts);
+      setShowHint(false);
       setRoundResult(null);
       resetQuestionUi();
       setView("quiz");
@@ -330,32 +1054,125 @@ function App() {
     }
   }
 
-  async function handleSubmitAnswer() {
-    if (!token || !currentQuestion || !canSubmitAnswer) {
+  async function resetCurrentRoute(openQuizImmediately = false) {
+    if (!token || !currentRoute) {
       return;
     }
 
-    setBusyLabel("Проверяем прыжок...");
+    setBusyLabel("Сбрасываем прогресс маршрута...");
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const nextProgress = await resetProgress(token, currentRoute.topic);
+      setProgress(nextProgress);
+      rememberProgress(nextProgress);
+      setDisplayIndex(nextProgress.current_index);
+      clearRouteHearts(currentRoute.topic);
+      syncLevelHearts(currentRoute.topic, nextProgress.current_level_index, HEARTS_PER_LEVEL);
+      setShowHint(false);
+      resetQuestionUi();
+      setRoundResult(null);
+      setView(openQuizImmediately ? "quiz" : "difficulty");
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleResetAllProgress() {
+    if (!token) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Сбросить прогресс по всем маршрутам? Монеты, покупки и данные профиля сохранятся.",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setBusyLabel("Сбрасываем общий прогресс...");
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const response = await resetAllProgress(token);
+      replaceProgressCache(response.items);
+      setRoundResult(null);
+      setHearts(HEARTS_PER_LEVEL);
+      setLevelHearts({});
+      setShowHint(false);
+      resetQuestionUi();
+
+      if (currentRoute) {
+        const nextProgress =
+          response.items.find((item) => item.topic === currentRoute.topic) ?? null;
+        if (nextProgress) {
+          setProgress(nextProgress);
+          setDisplayIndex(nextProgress.current_index);
+        }
+      } else {
+        setProgress(null);
+        setDisplayIndex(0);
+      }
+
+      setSuccessMessage("Прогресс по всем маршрутам сброшен.");
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleSubmitAnswer() {
+    if (!token || !currentRoute || !currentQuestion || !canSubmitAnswer) {
+      return;
+    }
+
+    setBusyLabel("Проверяем ответ...");
     setErrorMessage("");
 
     try {
       const result = await submitAnswer(token, {
-        topic: TOPIC,
+        topic: currentRoute.topic,
         question_id: currentQuestion.id,
         answer: currentAnswer,
       });
+      setUser(result.user);
+
+      let nextFeedbackAction: FeedbackAction = "retry";
+      let nextProgress = result.next_progress;
+
+      if (result.is_correct) {
+        nextFeedbackAction = "advance";
+
+        if (result.quiz_completed) {
+          setRoundResult({
+            finalScore: result.final_score ?? 0,
+            totalQuestions: result.total_questions,
+            bestScore: result.next_progress.best_score,
+            completedRuns: result.next_progress.completed_runs,
+            routeTitle: getRouteTitle(currentRoute),
+          });
+          await refreshLeaderboard(currentRoute.topic, leaderboardMetric);
+        }
+      } else {
+        const remainingHearts = hearts - 1;
+        if (remainingHearts <= 0) {
+          nextProgress = await resetLevel(token, { topic: currentRoute.topic });
+          nextFeedbackAction = "level-reset";
+          syncLevelHearts(currentRoute.topic, currentQuestion.level_index, 0);
+        } else {
+          syncLevelHearts(currentRoute.topic, currentQuestion.level_index, remainingHearts);
+          nextFeedbackAction = "retry";
+        }
+      }
 
       setFeedback(result);
-      setPendingProgress(result.next_progress);
-
-      if (result.quiz_completed) {
-        setRoundResult({
-          finalScore: result.final_score ?? 0,
-          totalQuestions: result.total_questions,
-          bestScore: result.next_progress.best_score,
-        });
-        await refreshLeaderboard();
-      }
+      setFeedbackAction(nextFeedbackAction);
+      setPendingProgress(nextProgress);
     } catch (error) {
       handleApiFailure(error);
     } finally {
@@ -364,25 +1181,56 @@ function App() {
   }
 
   function handleNextAfterFeedback() {
-    if (!feedback || !pendingProgress) {
+    if (!feedback || !currentRoute || !currentQuestion) {
       return;
     }
 
-    setProgress(pendingProgress);
-
     if (feedback.quiz_completed) {
-      resetQuestionUi();
+      if (pendingProgress) {
+        setProgress(pendingProgress);
+        rememberProgress(pendingProgress);
+      }
+      clearRouteHearts(currentRoute.topic);
       setDisplayIndex(0);
+      setHearts(HEARTS_PER_LEVEL);
+      setShowHint(false);
+      resetQuestionUi();
       setView("result");
       return;
     }
 
-    setDisplayIndex(pendingProgress.current_index);
+      if (feedbackAction === "advance" && pendingProgress) {
+        setProgress(pendingProgress);
+        rememberProgress(pendingProgress);
+        setDisplayIndex(pendingProgress.current_index);
+        if (pendingProgress.current_level_index !== currentQuestion.level_index) {
+          syncLevelHearts(currentRoute.topic, pendingProgress.current_level_index, HEARTS_PER_LEVEL);
+        } else {
+          setHearts(
+            getStoredHearts(
+              currentRoute.topic,
+              currentQuestion.level_index,
+              pendingProgress.remaining_hearts,
+            ),
+          );
+        }
+        setShowHint(false);
+      }
+
+    if (feedbackAction === "level-reset" && pendingProgress) {
+      setProgress(pendingProgress);
+      rememberProgress(pendingProgress);
+      setDisplayIndex(pendingProgress.current_index);
+      syncLevelHearts(currentRoute.topic, pendingProgress.current_level_index, HEARTS_PER_LEVEL);
+      setShowHint(false);
+    }
+
     resetQuestionUi();
   }
 
   function beginEditQuestion(question: AdminQuestion) {
     setEditingQuestionId(question.id);
+    setSelectedAdminQuestionId(question.id);
     setDraft({
       topic: question.topic,
       type: question.type,
@@ -393,7 +1241,7 @@ function App() {
       options_text: question.options.join("\n"),
       answers_text: question.correct_answers.join("\n"),
     });
-    setSuccessMessage("Режим редактирования включен.");
+    setSuccessMessage("Вопрос открыт для редактирования.");
     setErrorMessage("");
   }
 
@@ -409,7 +1257,7 @@ function App() {
       .filter(Boolean);
 
     return {
-      topic: draft.topic.trim().toLowerCase() || TOPIC,
+      topic: draft.topic.trim().toLowerCase() || currentRoute?.topic || DEFAULT_TOPIC,
       type: draft.type,
       prompt: normalizeWhitespace(draft.prompt),
       explanation: normalizeWhitespace(draft.explanation),
@@ -426,7 +1274,7 @@ function App() {
       return;
     }
 
-    setBusyLabel(editingQuestionId ? "Сохраняем изменения..." : "Добавляем вопрос...");
+    setBusyLabel(editingQuestionId ? "Сохраняем вопрос..." : "Добавляем вопрос...");
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -438,11 +1286,11 @@ function App() {
         setSuccessMessage("Вопрос обновлен.");
       } else {
         await createAdminQuestion(token, payload);
-        setSuccessMessage("Новый вопрос добавлен.");
+        setSuccessMessage("Вопрос добавлен.");
       }
 
-      resetDraftForm();
-      await hydrateSession(token, "admin");
+      resetDraftForm(payload.topic);
+      await openAdmin(payload.topic);
     } catch (error) {
       handleApiFailure(error);
     } finally {
@@ -455,7 +1303,7 @@ function App() {
       return;
     }
 
-    const confirmed = window.confirm("Удалить этот вопрос из базы?");
+    const confirmed = window.confirm("Удалить вопрос?");
     if (!confirmed) {
       return;
     }
@@ -470,7 +1318,7 @@ function App() {
         resetDraftForm();
       }
       setSuccessMessage("Вопрос удален.");
-      await hydrateSession(token, "admin");
+      await openAdmin(draft.topic);
     } catch (error) {
       handleApiFailure(error);
     } finally {
@@ -486,24 +1334,53 @@ function App() {
     return (
       <div className="top-nav">
         <div className="top-nav__identity">
-          <span className="top-nav__frog" aria-hidden="true">
-            🐸
-          </span>
+          <FrogAvatar
+            accessory={user.active_skin}
+            className="top-nav__frog"
+            frogClassName="top-nav__frog-svg"
+            frogSize={46}
+          />
           <div>
-            <strong>{user.username}</strong>
-            <span>{user.is_admin ? "Админ болота" : "Игрок маршрута"}</span>
+            <strong>{getUserHandle(user)}</strong>
+            <span>
+              {currentRoute
+                ? `Маршрут: ${getRouteTitle(currentRoute)}`
+                : "Выберите язык и сложность"}
+            </span>
+            <div className="top-nav__chips">
+              {user.tag && <span className="top-nav__chip">🏷️ #{user.tag}</span>}
+              <span className="top-nav__chip">💰 {user.coins}</span>
+              <span className="top-nav__chip top-nav__chip--skin">
+                {user.active_skin_icon} {user.active_skin_label}
+              </span>
+            </div>
           </div>
         </div>
 
         <div className="top-nav__actions">
-          <button className="button button--ghost" onClick={() => setView("dashboard")}>
+          <button className="button button--ghost" onClick={() => setView("menu")}>
             Главная
           </button>
-          <button className="button button--ghost" onClick={openLeaderboard}>
+          <button className="button button--ghost" onClick={openAccount}>
+            Аккаунт
+          </button>
+          <button
+            className="button button--ghost"
+            onClick={() => setView(currentRoute ? "difficulty" : "menu")}
+          >
+            Уровни
+          </button>
+          <button
+            className="button button--ghost"
+            onClick={() => void openLeaderboard()}
+          >
             Лидеры
           </button>
+          <button className="button button--ghost" onClick={() => void openShop()}>
+            Магазин
+          </button>
           {user.is_admin && (
-            <button className="button button--ghost" onClick={openAdmin}>
+            <button className="button button--ghost" onClick={() => void openAdmin()}>
               Админка
             </button>
           )}
@@ -533,45 +1410,88 @@ function App() {
 
   function renderAuthView() {
     return (
-      <section className="card">
-        <div className="scene-layout">
-          <div className="scene-copy">
-            <div className="card-badge">Portfolio Fullstack Edition</div>
-            <h2>Теперь это уже настоящий fullstack-проект</h2>
-            <p className="card-text">
-              В старой версии прогресс жил локально в Python-игре. Теперь у нас
-              есть backend на FastAPI, SQLite, регистрация, лидерборд и админка
-              для вопросов.
-            </p>
+      <section className="card card--auth">
+        <div className="auth-layout">
+          <div className="auth-overview" style={AUTH_SCENE_STYLE}>
+            <div className="auth-overview__glass">
+              <div className="auth-overview__intro">
+                <h2>Аккаунт Froggy Coder</h2>
+                <p className="auth-overview__text">
+                  Вход в приложение с маршрутами по программированию, прогрессом по уровням
+                  и наградами за правильные ответы.
+                </p>
+              </div>
 
-            <div className="stats-row">
-              <div className="stat-box">
-                <span className="stat-label">Frontend</span>
-                <strong>React + Vite + TypeScript</strong>
-              </div>
-              <div className="stat-box">
-                <span className="stat-label">Backend</span>
-                <strong>FastAPI + SQLite</strong>
-              </div>
-              <div className="stat-box">
-                <span className="stat-label">Источник правды</span>
-                <strong>Сервер и база данных</strong>
+              <div className="auth-benefits">
+                <article className="auth-benefit">
+                  <span className="auth-benefit__icon" aria-hidden="true">
+                    🗺️
+                  </span>
+                  <div>
+                    <strong>Маршруты и уровни</strong>
+                    <p>
+                      Выбирайте язык, сложность и проходите уровни по Python и
+                      JavaScript в удобном темпе.
+                    </p>
+                  </div>
+                </article>
+
+                <article className="auth-benefit">
+                  <span className="auth-benefit__icon" aria-hidden="true">
+                    💾
+                  </span>
+                  <div>
+                    <strong>Прогресс сохраняется</strong>
+                    <p>
+                      Аккаунт хранит открытые уровни, статистику маршрутов, монеты и
+                      выбранные аксессуары.
+                    </p>
+                  </div>
+                </article>
+
+                <article className="auth-benefit">
+                  <span className="auth-benefit__icon" aria-hidden="true">
+                    🏆
+                  </span>
+                  <div>
+                    <strong>Награды и рейтинг</strong>
+                    <p>
+                      Получайте монеты за правильные ответы, открывайте предметы в
+                      магазине и поднимайтесь в таблице лидеров.
+                    </p>
+                  </div>
+                </article>
               </div>
             </div>
           </div>
 
-          <div className="scene-art" style={AUTH_SCENE_STYLE}>
-            <div className="frog-bubble">
-              Ква! Входи в аккаунт и болото начнет хранить твой прогресс,
-              результаты и место в таблице лидеров.
+          <div className="auth-form-card">
+            <div className="auth-form-card__header">
+              <div>
+                <p className="auth-kicker">
+                  {authMode === "register" ? "Новый аккаунт" : "С возвращением"}
+                </p>
+                <h3>
+                  {authMode === "register" ? "Создать аккаунт" : "Войти в аккаунт"}
+                </h3>
+              </div>
+              <span className="auth-form-card__emoji" aria-hidden="true">
+                🐸
+              </span>
             </div>
 
-            <form className="auth-card" onSubmit={handleAuthSubmit}>
-              <div className="mode-switch">
+            <p className="auth-form-card__text">
+              {authMode === "register"
+                ? "Создайте профиль, чтобы сохранять прогресс, монеты и купленные аксессуары. Уникальный тег будет назначен автоматически."
+                : "Войдите, чтобы продолжить с сохраненного места. Можно использовать имя пользователя или логин в формате имя#тег."}
+            </p>
+
+            <form className="auth-form" onSubmit={handleAuthSubmit}>
+              <div className="auth-switch">
                 <button
                   type="button"
-                  className={`mode-switch__btn ${
-                    authMode === "register" ? "mode-switch__btn--active" : ""
+                  className={`auth-switch__btn ${
+                    authMode === "register" ? "auth-switch__btn--active" : ""
                   }`}
                   onClick={() => setAuthMode("register")}
                 >
@@ -579,8 +1499,8 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  className={`mode-switch__btn ${
-                    authMode === "login" ? "mode-switch__btn--active" : ""
+                  className={`auth-switch__btn ${
+                    authMode === "login" ? "auth-switch__btn--active" : ""
                   }`}
                   onClick={() => setAuthMode("login")}
                 >
@@ -588,18 +1508,20 @@ function App() {
                 </button>
               </div>
 
-              <label className="field">
-                <span>Имя пользователя</span>
+              <label className="field field--auth">
+                <span>
+                  {authMode === "login" ? "Имя пользователя или имя#тег" : "Имя пользователя"}
+                </span>
                 <input
                   value={authForm.username}
                   onChange={(event) =>
                     setAuthForm((prev) => ({ ...prev, username: event.target.value }))
                   }
-                  placeholder="frog_coder"
+                  placeholder={authMode === "login" ? "frog_coder#1234" : "frog_coder"}
                 />
               </label>
 
-              <label className="field">
+              <label className="field field--auth">
                 <span>Пароль</span>
                 <input
                   type="password"
@@ -612,161 +1534,375 @@ function App() {
               </label>
 
               <button className="button button--primary" type="submit">
-                {authMode === "login" ? "Войти в болото" : "Создать аккаунт"}
+                {authMode === "login" ? "Войти" : "Создать аккаунт"}
               </button>
             </form>
+
+            <div className="auth-footnote">
+              <span>Языки: Python и JavaScript</span>
+              <span>Уровни сложности: Easy / Medium / Hard</span>
+            </div>
           </div>
         </div>
       </section>
     );
   }
 
-  function renderDashboardView() {
-    const hasProgress = progress !== null && progress.current_index > 0;
+  function renderMenuView() {
+    const currentRuns = currentRoute ? routeProgressCache[currentRoute.topic]?.completed_runs ?? 0 : 0;
+    const currentCoins = user?.coins ?? 0;
 
     return (
       <section className="card">
         <div className="scene-layout">
           <div className="scene-copy">
-            <div className="card-badge">Серверный профиль игрока</div>
-            <h2>{APP_TITLE} теперь хранит прогресс на backend</h2>
+            <div className="card-badge">Главное меню</div>
+            <h2>Выберите язык и откройте нужный маршрут</h2>
             <p className="card-text">
-              Это уже не локальная демка. Пользователь регистрируется, играет,
-              получает результат, попадает в лидерборд, а вопросы хранятся и
-              редактируются через админку.
+              Каждый маршрут разбит по сложности и уровням. Прогресс, монеты и результаты
+              сохраняются автоматически в профиле.
             </p>
 
             <div className="stats-row">
-              <div className="stat-box">
-                <span className="stat-label">Текущий маршрут</span>
-                <strong>
-                  {progress ? `${progress.current_index}/${progress.total_questions}` : "0/0"}
-                </strong>
-              </div>
-              <div className="stat-box">
-                <span className="stat-label">Лучший результат</span>
-                <strong>{progress ? progress.best_score : 0}</strong>
-              </div>
-              <div className="stat-box">
-                <span className="stat-label">Завершенные забеги</span>
-                <strong>{progress ? progress.completed_runs : 0}</strong>
-              </div>
-            </div>
+              <article className="stat-box">
+                <span className="stat-label">Языков</span>
+                <strong>{languageOptions.length}</strong>
+              </article>
 
-            <div className="actions-row">
-              <button className="button button--primary" onClick={() => void startRun(false)}>
-                {hasProgress
-                  ? `Продолжить с кочки ${progress!.current_index + 1}`
-                  : "Начать новый забег"}
-              </button>
-              <button className="button button--ghost" onClick={() => void startRun(true)}>
-                Сбросить и начать сначала
-              </button>
-              <button className="button button--ghost" onClick={openLeaderboard}>
-                Таблица лидеров
-              </button>
-              {user?.is_admin && (
-                <button className="button button--ghost" onClick={openAdmin}>
-                  Открыть админку
-                </button>
-              )}
+              <article className="stat-box">
+                <span className="stat-label">Маршрутов</span>
+                <strong>{routes.length}</strong>
+              </article>
+
+              <article className="stat-box">
+                <span className="stat-label">Монет в кошельке</span>
+                <strong>{currentCoins}</strong>
+              </article>
             </div>
           </div>
 
-          <div className="scene-art" style={DASHBOARD_SCENE_STYLE}>
+          <div className="scene-art" style={MENU_SCENE_STYLE}>
             <div className="frog-bubble">
-              Ква! Теперь каждый прыжок уходит на сервер: аккаунты, прогресс,
-              лидерборд и вопросы для будущих игроков.
+              Выберите язык программирования, затем откройте нужную сложность и
+              продолжайте с последнего доступного уровня.
             </div>
 
             <div className="preview-panel">
-              <h3>Топ болота</h3>
-              {leaderboard.length === 0 ? (
-                <p>Лидерборд пока пуст. Стань первым в таблице.</p>
-              ) : (
-                <ol className="leaderboard-mini">
-                  {leaderboard.slice(0, 5).map((entry) => (
-                    <li key={entry.rank}>
-                      <span>#{entry.rank}</span>
-                      <strong>{entry.username}</strong>
-                      <em>{entry.best_score}</em>
-                    </li>
-                  ))}
-                </ol>
-              )}
+              <h3>Что доступно</h3>
+              <p>
+                Маршруты, уровни, подсказки, жизни, магазин и таблица лидеров уже
+                доступны в приложении.
+              </p>
             </div>
 
+            <FrogFamily />
+
             <p className="scene-caption">
-              Старый вайб с болотом остался, но архитектура уже как у
-              полноценного портфолио-проекта.
+              Текущий маршрут: {currentRoute ? getRouteTitle(currentRoute) : "не выбран"}
             </p>
           </div>
+        </div>
+
+        <div className="route-grid">
+          {languageOptions.map((language) => (
+            <button
+              key={language}
+              type="button"
+              className={`route-card ${
+                selectedLanguage === language ? "route-card--active" : ""
+              }`}
+              onClick={() => {
+                setSelectedLanguage(language);
+                setView("difficulty");
+              }}
+            >
+              <span className="route-card__eyebrow">Язык</span>
+              <strong>{language}</strong>
+              <span>
+                {routes.filter((route) => route.language === language).length} маршрута
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="actions-row">
+          <button className="button button--ghost" onClick={openAccount}>
+            Аккаунт
+          </button>
+          <button className="button button--ghost" onClick={() => void openShop()}>
+            Открыть магазин
+          </button>
+          <button className="button button--ghost" onClick={() => void openLeaderboard()}>
+            Таблица лидеров
+          </button>
+          <button
+            className="button button--ghost button--danger"
+            onClick={() => void handleResetAllProgress()}
+          >
+            Сбросить весь прогресс
+          </button>
+          <span className="account-chip">Прохождений текущего маршрута: {currentRuns}</span>
         </div>
       </section>
     );
   }
 
+  function renderDifficultyView() {
+    const activeRoute =
+      currentRoute && currentRoute.language === selectedLanguage ? currentRoute : null;
+    const activeProgress = activeRoute
+      ? routeProgressCache[activeRoute.topic] ??
+        (progress?.topic === activeRoute.topic ? progress : null)
+      : null;
+    const hasActiveQuestions = (activeRoute?.questions_total ?? 0) > 0;
+    const levels = activeRoute
+      ? Array.from({ length: activeRoute.levels_total }, (_, index) => index)
+      : [];
+
+    return (
+      <section className="card">
+        <div className="card-badge">Сложность</div>
+        <h2>{selectedLanguage}: выберите уровень сложности</h2>
+        <p className="card-text">
+          Для каждой сложности доступен отдельный маршрут с собственным прогрессом,
+          статистикой и набором уровней.
+        </p>
+
+        <div className="route-grid">
+          {difficultyOptions.map((route) => {
+            const savedProgress = routeProgressCache[route.topic];
+            const isActiveRoute = activeRoute?.topic === route.topic;
+            return (
+              <article key={route.topic} className="route-card route-card--panel">
+                <span className="route-card__eyebrow">{route.language}</span>
+                <strong>{route.difficulty_label}</strong>
+                <span>{route.questions_total} заданий</span>
+                <span>{getRouteContentHint(route)}</span>
+                <span>
+                  {savedProgress
+                    ? `Открыт уровень ${savedProgress.unlocked_level_index + 1}`
+                    : "Еще не запускался"}
+                </span>
+
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={() => void chooseDifficulty(route)}
+                >
+                  {isActiveRoute ? "Обновить маршрут" : "Открыть маршрут"}
+                </button>
+              </article>
+            );
+          })}
+        </div>
+
+        {activeRoute && activeProgress && hasActiveQuestions && (
+          <>
+            <div className="card-badge">Уровни маршрута</div>
+            <h3>{getRouteTitle(activeRoute)}</h3>
+            <p className="card-text">
+              Продолжайте с последней точки или запускайте любой доступный уровень.
+              Сейчас активны уровень {activeProgress.current_level_index + 1} и задание{" "}
+              {activeProgress.current_task_index + 1}.
+            </p>
+
+            <div className="map-summary">
+              <span className="account-chip">
+                Открыт уровень: {activeProgress.unlocked_level_index + 1}
+              </span>
+              <span className="account-chip">
+                Завершенных забегов: {activeProgress.completed_runs}
+              </span>
+              <span className="account-chip">
+                Лучший счет: {activeProgress.best_score}
+              </span>
+              <span className="account-chip">Монеты: {user?.coins ?? 0}</span>
+            </div>
+
+            <div className="level-map">
+              {levels.map((levelIndex) => {
+                const isUnlocked = levelIndex <= activeProgress.unlocked_level_index;
+                const isCurrent = levelIndex === activeProgress.current_level_index;
+                const isReplayable = levelIndex < activeProgress.current_level_index;
+                const statusClass = isUnlocked
+                  ? isCurrent
+                    ? "map-node--current"
+                    : "map-node--done"
+                  : "map-node--locked";
+                const nodeText = isCurrent
+                  ? `Задание ${activeProgress.current_task_index + 1}/${activeProgress.tasks_per_level}`
+                  : isUnlocked
+                    ? isReplayable
+                      ? "Доступен повтор"
+                      : "Доступен"
+                    : "Недоступен";
+                const buttonText =
+                  levelIndex === activeProgress.current_level_index &&
+                  activeProgress.current_task_index > 0
+                    ? "Продолжить"
+                    : isReplayable
+                      ? "Пройти заново"
+                      : "Начать";
+
+                return (
+                  <article key={levelIndex} className={`map-node ${statusClass}`}>
+                    <div className="map-node__circle">{levelIndex + 1}</div>
+                    <strong>Уровень {levelIndex + 1}</strong>
+                    <span>{nodeText}</span>
+
+                    {isUnlocked ? (
+                      <button
+                        type="button"
+                        className="button button--primary"
+                        onClick={() => void startLevel(levelIndex)}
+                      >
+                        {buttonText}
+                      </button>
+                    ) : (
+                      <button type="button" className="button button--ghost" disabled>
+                        Недоступен
+                      </button>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+
+            <div className="actions-row">
+              <button className="button button--ghost" onClick={() => setView("menu")}>
+                К языкам
+              </button>
+              <button
+                className="button button--ghost"
+                onClick={() => void resetCurrentRoute(false)}
+              >
+                Сбросить прогресс маршрута
+              </button>
+            </div>
+          </>
+        )}
+
+        {activeRoute && activeProgress && !hasActiveQuestions && (
+          <>
+            <div className="card-badge">Уровни маршрута</div>
+            <h3>{getRouteTitle(activeRoute)}</h3>
+            <div className="empty-state">
+              Для этого маршрута пока нет заданий. Контент для маршрута еще не добавлен.
+            </div>
+
+            <div className="actions-row">
+              <button className="button button--ghost" onClick={() => setView("menu")}>
+                К языкам
+              </button>
+              {user?.is_admin && (
+                <button
+                  className="button button--primary"
+                  onClick={() => void openAdmin(activeRoute.topic)}
+                >
+                  Открыть админку
+                </button>
+              )}
+            </div>
+          </>
+        )}
+
+        {!activeRoute && (
+          <div className="actions-row">
+            <button className="button button--ghost" onClick={() => setView("menu")}>
+              К языкам
+            </button>
+          </div>
+        )}
+      </section>
+    );
+  }
+
   function renderQuizView() {
-    if (!currentQuestion || !progress) {
+    if (!currentQuestion || !progress || !currentRoute) {
       return null;
     }
+
+    const currentLevelQuestions = questions.filter(
+      (question) => question.level_index === currentQuestion.level_index,
+    );
+    const heartsLeft = Array.from({ length: HEARTS_PER_LEVEL }, (_, index) => index < hearts);
+    const questionHint =
+      currentQuestion.hint.trim().length > 0
+        ? currentQuestion.hint
+        : currentQuestion.placeholder?.trim() || "Подсказка для этого задания пока не добавлена.";
+    const actionLabel =
+      feedback === null
+        ? "Проверить ответ"
+        : feedback.quiz_completed
+          ? "К результатам"
+          : feedbackAction === "level-reset"
+            ? "Начать уровень заново"
+            : feedbackAction === "advance"
+              ? "Следующее задание"
+              : "Повторить попытку";
 
     return (
       <section className="card card--quiz">
         <div className="quiz-topbar">
           <div>
-            <p className="eyebrow">Серверный забег</p>
-            <h2>
-              {APP_TITLE}: Python swamp run
-            </h2>
+            <p className="eyebrow">{getRouteTitle(currentRoute)}</p>
+            <h2>Уровень {currentQuestion.level_index + 1}</h2>
           </div>
 
           <div className="quiz-meta">
             <span>
-              Кочка {displayIndex + 1} / {progress.total_questions}
+              Задание {currentQuestion.task_index + 1} / {progress.tasks_per_level}
             </span>
-            <span>Текущий счет: {displayedScore}</span>
+            <span>Пройдено задач: {progress.current_score}</span>
           </div>
         </div>
 
-        <div className="lily-row" aria-label="Карта прогресса">
-          {questions.map((question, index) => {
-            const isAnswered = index < displayIndex;
-            const isCurrent = index === displayIndex;
+        <div className="quiz-strip">
+          <div className="task-dots" aria-label="Прогресс внутри уровня">
+            {currentLevelQuestions.map((question) => {
+              const isCurrent = question.id === currentQuestion.id;
+              const isDone = question.task_index < currentQuestion.task_index;
 
-            return (
-              <div
-                key={question.id}
-                className={`lily-pad ${
-                  isAnswered
-                    ? "lily-pad--done"
-                    : isCurrent
-                      ? "lily-pad--current"
-                      : "lily-pad--next"
-                }`}
-              >
-                <span>{index + 1}</span>
-              </div>
-            );
-          })}
-        </div>
+              return (
+                <div
+                  key={question.id}
+                  className={`task-dot ${
+                    isDone
+                      ? "task-dot--done"
+                      : isCurrent
+                        ? "task-dot--current"
+                        : "task-dot--next"
+                  }`}
+                  aria-hidden="true"
+                />
+              );
+            })}
+          </div>
 
-        <div className="frog-hint">
-          <span className="frog-hint__emoji" aria-hidden="true">
-            🐸
-          </span>
-          <span>
-            {feedback
-              ? feedback.is_correct
-                ? "Хороший прыжок. Сервер уже сохранил его в прогресс."
-                : "Нормально. Ошибка тоже записана, а объяснение поможет дойти дальше."
-              : "Ответ проверяет backend, а фронт только показывает маршрут и реакцию лягушки."}
-          </span>
+          <div className="hearts-bar" aria-label="Сердца">
+            {heartsLeft.map((isAlive, index) => (
+              <span key={index} className={isAlive ? "heart heart--alive" : "heart"}>
+                {isAlive ? "❤️" : "🖤"}
+              </span>
+            ))}
+          </div>
         </div>
 
         <div className="question-box">
-          <p className="question-number">Вопрос из базы данных</p>
+          <p className="question-number">Задание маршрута</p>
           <h3>{currentQuestion.prompt}</h3>
+        </div>
+
+        <div className="hint-panel">
+          <button
+            className="button button--ghost"
+            type="button"
+            onClick={() => setShowHint((prev) => !prev)}
+          >
+            {showHint ? "Скрыть подсказку" : "Показать подсказку"}
+          </button>
+
+          {showHint && <p>{questionHint}</p>}
         </div>
 
         {currentQuestion.type === "choice" ? (
@@ -801,11 +1937,16 @@ function App() {
           </div>
         ) : (
           <label className="field">
-            <span>Код для прыжка</span>
+            <span>Ответ</span>
             <input
               value={typedAnswer}
-              placeholder={currentQuestion.placeholder ?? "Введи ответ"}
+              placeholder={currentQuestion.placeholder ?? "Введите ответ"}
               onChange={(event) => setTypedAnswer(event.target.value)}
+              autoCapitalize="none"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              translate="no"
               disabled={feedback !== null}
             />
           </label>
@@ -819,15 +1960,14 @@ function App() {
           >
             <strong>
               {feedback.is_correct
-                ? "Ква, верно. Прыжок засчитан."
-                : "Прыжок мимо кочки."}
+                ? `Правильно. +${feedback.coins_awarded} монет.`
+                : feedbackAction === "level-reset"
+                  ? "Попытки закончились. Уровень начнется заново."
+                  : `Неверно. Осталось жизней: ${hearts}.`}
             </strong>
             {!feedback.is_correct && (
-              <span>
-                Правильный ответ: {feedback.correct_answers.join(" или ")}
-              </span>
+              <span>Правильный ответ: {feedback.correct_answers.join(" или ")}</span>
             )}
-            <span>{feedback.explanation}</span>
           </div>
         )}
 
@@ -837,15 +1977,11 @@ function App() {
             onClick={feedback ? handleNextAfterFeedback : () => void handleSubmitAnswer()}
             disabled={!feedback && !canSubmitAnswer}
           >
-            {feedback
-              ? feedback.quiz_completed
-                ? "К экрану результата"
-                : "На следующую кочку"
-              : "Проверить на сервере"}
+            {actionLabel}
           </button>
 
-          <button className="button button--ghost" onClick={() => setView("dashboard")}>
-            На главную
+          <button className="button button--ghost" onClick={() => setView("difficulty")}>
+            К уровням
           </button>
         </div>
       </section>
@@ -853,7 +1989,7 @@ function App() {
   }
 
   function renderResultView() {
-    if (!roundResult || !progress) {
+    if (!roundResult || !currentRoute) {
       return null;
     }
 
@@ -861,55 +1997,59 @@ function App() {
       <section className="card">
         <div className="scene-layout">
           <div className="scene-copy">
-            <div className="card-badge">Финиш и запись в лидерборд</div>
-            <h2>Забег завершен и сохранен на сервере</h2>
+            <div className="card-badge">Результаты</div>
+            <h2>Маршрут завершен: {roundResult.routeTitle}</h2>
             <p className="score-line">
-              Итог: <strong>{roundResult.finalScore}</strong> из{" "}
-              <strong>{roundResult.totalQuestions}</strong>
+              Пройдено <strong>{roundResult.finalScore}</strong> из{" "}
+              <strong>{roundResult.totalQuestions}</strong> заданий.
             </p>
             <p className="card-text">
-              Лучший результат в профиле: <strong>{roundResult.bestScore}</strong>.
-              Завершенных забегов: <strong>{progress.completed_runs}</strong>.
+              Лучший результат на этом маршруте: <strong>{roundResult.bestScore}</strong>.
+              Всего завершенных прохождений: <strong>{roundResult.completedRuns}</strong>.
             </p>
 
             <div className="result-ring">
-              <span>
-                {Math.round(
-                  (roundResult.finalScore / roundResult.totalQuestions) * 100,
-                )}
-                %
-              </span>
+              <span>100%</span>
             </div>
 
             <div className="actions-row">
-              <button className="button button--primary" onClick={() => void startRun(true)}>
-                Новый забег
+              <button
+                className="button button--primary"
+                onClick={() => void resetCurrentRoute(true)}
+              >
+                Играть снова
               </button>
-              <button className="button button--ghost" onClick={openLeaderboard}>
-                Посмотреть лидеров
+              <button className="button button--ghost" onClick={() => setView("difficulty")}>
+                К уровням
               </button>
-              <button className="button button--ghost" onClick={() => setView("dashboard")}>
-                Вернуться в профиль
+              <button
+                className="button button--ghost"
+                onClick={() => void openLeaderboard(currentRoute.topic)}
+              >
+                Лидеры
               </button>
             </div>
           </div>
 
           <div className="scene-art" style={RESULT_SCENE_STYLE}>
             <div className="frog-bubble frog-bubble--result">
-              Ква! Теперь результат не исчезает после перезапуска. Он уже в базе
-              и может попасть в таблицу лидеров.
+              Финиш! Результат сохранен в профиле, а лучший рекорд учтен в таблице
+              лидеров.
             </div>
 
             <div className="preview-panel">
-              <h3>Смысл fullstack-версии</h3>
+              <h3>Что сохраняется после финиша</h3>
               <p>
-                Frontend рисует маршрут, backend проверяет ответы, база хранит
-                аккаунты, прогресс и лучшие забеги.
+                Прогресс по маршрутам, завершенные прохождения, монеты и купленные
+                предметы сохраняются в аккаунте автоматически.
               </p>
             </div>
 
+            <FrogFamily />
+
             <p className="scene-caption">
-              Это уже выглядит как проект, который можно показывать в портфолио.
+              Можно пройти маршрут еще раз, улучшить рекорд или выбрать новый
+              маршрут.
             </p>
           </div>
         </div>
@@ -917,32 +2057,348 @@ function App() {
     );
   }
 
+  function renderAccountView() {
+    if (!user) {
+      return null;
+    }
+
+    const trackedRoute =
+      routes.find((route) => route.topic === accountRouteTopic) ??
+      (currentRoute && currentRoute.language === selectedLanguage ? currentRoute : null) ??
+      routes.find((route) => route.language === selectedLanguage) ??
+      currentRoute ??
+      routes[0] ??
+      null;
+    const trackedProgress = trackedRoute
+      ? routeProgressCache[trackedRoute.topic] ??
+        (progress?.topic === trackedRoute.topic ? progress : null)
+      : null;
+    const routeLabel = trackedRoute ? getRouteTitle(trackedRoute) : "Маршрут не выбран";
+    const currentDisplayName = accountForm.displayName.trim() || user.username;
+    const loginPreview = user.tag ? `${currentDisplayName}#${user.tag}` : currentDisplayName;
+    const openedQuestions = trackedProgress?.opened_questions ?? 0;
+    const progressPercent =
+      trackedProgress && trackedProgress.total_questions > 0
+        ? Math.round((openedQuestions / trackedProgress.total_questions) * 100)
+        : 0;
+
+    return (
+      <section className="card">
+        <div className="account-shell">
+          <div className="account-hero" style={MENU_SCENE_STYLE}>
+            <div className="account-hero__content">
+              <div className="account-hero__topline">
+                <FrogAvatar
+                  accessory={user.active_skin}
+                  className="account-avatar"
+                  frogClassName="account-avatar__frog"
+                  frogSize={62}
+                />
+
+                <div>
+                  <p className="account-kicker">Профиль</p>
+                  <h2>{loginPreview}</h2>
+                  <p className="account-subtitle">
+                    Здесь можно обновить имя пользователя и пароль. Уникальный тег
+                    сохраняется и остается частью логина.
+                  </p>
+                </div>
+              </div>
+
+              <div className="account-rankline">
+                <span className="account-chip">Тег: #{user.tag ?? "----"}</span>
+                <span className="account-chip">Маршрут: {routeLabel}</span>
+                <span className="account-chip">
+                  Образ: {user.active_skin_icon} {user.active_skin_label}
+                </span>
+                <span className="account-chip">Монеты: {user.coins}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="account-grid">
+            <div className="account-panel">
+              <div className="account-panel__header">
+                <div>
+                  <p className="account-panel__eyebrow">Аккаунт</p>
+                  <h3>Настройки профиля</h3>
+                </div>
+                <span className="account-progress-badge">Логин: {loginPreview}</span>
+              </div>
+
+              <form className="account-form" onSubmit={handleAccountSubmit}>
+                <label className="field">
+                  <span>Имя пользователя</span>
+                  <input
+                    value={accountForm.displayName}
+                    onChange={(event) =>
+                      setAccountForm((prev) => ({
+                        ...prev,
+                        displayName: event.target.value,
+                      }))
+                    }
+                    autoCapitalize="none"
+                    autoComplete="nickname"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    placeholder="frog_coder"
+                  />
+                </label>
+
+                <div className="account-form__meta">
+                  <div className="account-readonly">
+                    <span>Тег</span>
+                    <strong>#{user.tag ?? "----"}</strong>
+                  </div>
+                  <div className="account-readonly">
+                    <span>Логин для следующих входов</span>
+                    <strong>{loginPreview}</strong>
+                  </div>
+                </div>
+
+                <p className="account-form__hint">
+                  Тег закреплен за профилем. При смене имени обновится и полный логин
+                  формата `имя#тег`.
+                </p>
+
+                <div className="account-form__grid">
+                  <label className="field">
+                    <span>Текущий пароль</span>
+                    <input
+                      type="password"
+                      value={accountForm.currentPassword}
+                      onChange={(event) =>
+                        setAccountForm((prev) => ({
+                          ...prev,
+                          currentPassword: event.target.value,
+                        }))
+                      }
+                      autoComplete="current-password"
+                      placeholder="Требуется только при смене пароля"
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>Новый пароль</span>
+                    <input
+                      type="password"
+                      value={accountForm.newPassword}
+                      onChange={(event) =>
+                        setAccountForm((prev) => ({
+                          ...prev,
+                          newPassword: event.target.value,
+                        }))
+                      }
+                      autoComplete="new-password"
+                      placeholder="Минимум 6 символов"
+                    />
+                  </label>
+                </div>
+
+                <label className="field">
+                  <span>Повторите новый пароль</span>
+                  <input
+                    type="password"
+                    value={accountForm.confirmPassword}
+                    onChange={(event) =>
+                      setAccountForm((prev) => ({
+                        ...prev,
+                        confirmPassword: event.target.value,
+                      }))
+                    }
+                    autoComplete="new-password"
+                    placeholder="Повторите новый пароль"
+                  />
+                </label>
+
+                <p className="account-form__hint">
+                  Если пароль менять не нужно, оставьте поля пустыми.
+                </p>
+
+                <div className="account-actions">
+                  <button className="button button--primary" type="submit">
+                    Сохранить изменения
+                  </button>
+                  <button
+                    className="button button--ghost"
+                    type="button"
+                    onClick={() => resetAccountForm(user)}
+                  >
+                    Сбросить изменения
+                  </button>
+                </div>
+              </form>
+
+              <div className="account-note">
+                <span className="account-note__icon" aria-hidden="true">
+                  🔐
+                </span>
+                <div>
+                  <strong>Вход после смены имени</strong>
+                  <p>
+                    После сохранения используйте новый логин <strong>{loginPreview}</strong>.
+                    Текущая сессия при этом не прервется.
+                  </p>
+                </div>
+              </div>
+
+            </div>
+
+            <div className="account-side-stack">
+              <div className="account-panel">
+                <div className="account-panel__header">
+                  <div>
+                    <p className="account-panel__eyebrow">Прогресс</p>
+                    <h3>Статистика маршрута</h3>
+                  </div>
+                  <span className="account-progress-badge">
+                    {trackedRoute ? "Выбран маршрут" : "Маршрут не выбран"}
+                  </span>
+                </div>
+
+                <label className="field">
+                  <span>Маршрут для прогресса</span>
+                  <select
+                    value={trackedRoute?.topic ?? ""}
+                    onChange={(event) => setAccountRouteTopic(event.target.value)}
+                  >
+                    {routes.map((route) => (
+                      <option key={route.topic} value={route.topic}>
+                        {route.language} • {route.difficulty_label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="account-progress-card">
+                  <div className="account-progress-card__numbers">
+                    <strong>{openedQuestions}</strong>
+                    <span>
+                      {trackedProgress
+                        ? `из ${trackedProgress.total_questions} заданий открыто`
+                        : "прогресс по этому маршруту пока не зафиксирован"}
+                    </span>
+                  </div>
+
+                  <div className="account-progress-track" aria-hidden="true">
+                    <div
+                      className="account-progress-track__fill"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="account-metrics">
+                  <article className="account-metric">
+                    <span className="account-metric__label">Лучший счет</span>
+                    <strong>{trackedProgress?.best_score ?? 0}</strong>
+                  </article>
+                  <article className="account-metric">
+                    <span className="account-metric__label">Забеги</span>
+                    <strong>{trackedProgress?.completed_runs ?? 0}</strong>
+                  </article>
+                  <article className="account-metric">
+                    <span className="account-metric__label">Открыт уровень</span>
+                    <strong>{trackedProgress ? trackedProgress.unlocked_level_index + 1 : 1}</strong>
+                  </article>
+                </div>
+
+                <div className="actions-row">
+                  <button
+                    className="button button--primary"
+                    onClick={() => void openAccountRoute(trackedRoute)}
+                  >
+                    Открыть маршрут
+                  </button>
+                  <button className="button button--ghost" onClick={() => void openShop()}>
+                    Магазин
+                  </button>
+                </div>
+              </div>
+
+              <div className="account-panel">
+                <div className="account-panel__header">
+                  <div>
+                    <p className="account-panel__eyebrow">Промокод</p>
+                    <h3>Бонус для аккаунта</h3>
+                  </div>
+                  <span className="account-progress-badge">ПРОМОКОД</span>
+                </div>
+
+                <form className="account-form" onSubmit={handlePromoSubmit}>
+                  <label className="field">
+                    <span>Промокод</span>
+                    <input
+                      value={promoCode}
+                      onChange={(event) => setPromoCode(event.target.value.toUpperCase())}
+                      autoCapitalize="characters"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      placeholder="FROGBEST"
+                    />
+                  </label>
+
+                  <p className="account-form__hint">
+                    Промокод <strong>FROGBEST</strong> открывает все уровни и добавляет
+                    <strong> 1000 </strong> монет. Активировать его можно только один раз
+                    для каждого аккаунта.
+                  </p>
+
+                  <button className="button button--primary" type="submit">
+                    Активировать промокод
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   function renderLeaderboardView() {
+    const routeLabel = currentRoute ? getRouteTitle(currentRoute) : "маршрут не выбран";
+    const scopeText =
+      leaderboardScope === "global"
+        ? "Статистика по всем игрокам."
+        : `Статистика для маршрута ${routeLabel}.`;
+
     return (
       <section className="card">
         <div className="card-badge">Таблица лидеров</div>
-        <h2>Лучшие прыгуны по Python-болоту</h2>
-        <p className="card-text">
-          Лидерборд строится из серверных результатов, а не из локального
-          состояния браузера.
-        </p>
+        <h2>Таблица лидеров: {leaderboardMetricLabel}</h2>
+        <p className="card-text">{scopeText}</p>
+
+        <div className="leaderboard-toolbar">
+          <div className="map-summary">
+            <span className="account-chip">
+              {leaderboardScope === "global" ? "Все маршруты" : routeLabel}
+            </span>
+            <span className="account-chip">
+              Монеты: {user?.coins ?? 0}
+            </span>
+          </div>
+        </div>
 
         {leaderboard.length === 0 ? (
           <div className="empty-state">
-            Пока никто не завершил маршрут. Первый финиш будет твоим.
+            По этой метрике пока нет данных.
           </div>
         ) : (
           <div className="leaderboard-list">
             {leaderboard.map((entry) => (
-              <div key={`${entry.rank}-${entry.username}`} className="leaderboard-row">
+              <div
+                key={`${entry.rank}-${entry.full_username}`}
+                className="leaderboard-row"
+              >
                 <div className="leaderboard-row__rank">#{entry.rank}</div>
                 <div className="leaderboard-row__meta">
-                  <strong>{entry.username}</strong>
+                  <strong>{getLeaderboardHandle(entry)}</strong>
                   <span>Последний финиш: {formatDate(entry.last_played_at)}</span>
                 </div>
                 <div className="leaderboard-row__score">
-                  <span>Лучший счет: {entry.best_score}</span>
-                  <span>Забегов: {entry.completed_runs}</span>
+                  <strong>{leaderboardMetricLabel}: {entry.metric_value}</strong>
                 </div>
               </div>
             ))}
@@ -950,11 +2406,134 @@ function App() {
         )}
 
         <div className="actions-row">
-          <button className="button button--primary" onClick={() => setView("dashboard")}>
+          <button
+            className="button button--primary"
+            onClick={() => setView(currentRoute ? "difficulty" : "menu")}
+          >
             Назад
           </button>
           <button className="button button--ghost" onClick={() => void refreshLeaderboard()}>
             Обновить
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  function renderShopView() {
+    const ownedCount = shopItems.filter((item) => item.owned).length;
+
+    return (
+      <section className="card">
+        <div className="scene-layout">
+          <div className="scene-copy">
+            <div className="card-badge">Магазин</div>
+            <h2>Аксессуары и предметы профиля</h2>
+            <p className="card-text">
+              Покупайте предметы за монеты, которые начисляются за правильные ответы
+              в заданиях.
+            </p>
+
+            <div className="stats-row">
+              <article className="stat-box">
+                <span className="stat-label">Монеты</span>
+                <strong>{user?.coins ?? 0}</strong>
+              </article>
+
+              <article className="stat-box">
+                <span className="stat-label">Открыто предметов</span>
+                <strong>{ownedCount}</strong>
+              </article>
+
+              <article className="stat-box">
+                <span className="stat-label">Активный образ</span>
+                <strong>
+                  {user?.active_skin_icon} {user?.active_skin_label}
+                </strong>
+              </article>
+            </div>
+
+            <div className="frog-showcase">
+              <PrimitiveFrog
+                size={156}
+                color="#32c832"
+                accessory={user?.active_skin}
+                containAccessory
+                className="frog-showcase__frog"
+              />
+              <div className="frog-showcase__badge">
+                <span>{user?.active_skin_icon}</span>
+                <strong>{user?.active_skin_label}</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="scene-art" style={MENU_SCENE_STYLE}>
+            <div className="frog-bubble">
+              Активный предмет меняет внешний вид лягушки в профиле и в верхней панели.
+            </div>
+
+            <div className="preview-panel">
+              <h3>Как зарабатываются монеты</h3>
+              <p>
+                За каждый правильный ответ начисляется `+10` монет. Ошибки не
+                списывают уже накопленный баланс.
+              </p>
+            </div>
+
+            <FrogFamily />
+          </div>
+        </div>
+
+        <div className="shop-grid">
+          {shopItems.map((item) => {
+            const actionLabel = item.active
+              ? "Используется"
+              : item.owned
+                ? "Выбрать"
+                : `Купить за ${item.price}`;
+
+            return (
+              <article key={item.id} className={`shop-card ${item.active ? "shop-card--active" : ""}`}>
+                <div className="shop-card__head">
+                  <span className="shop-card__icon" aria-hidden="true">
+                    {item.icon}
+                  </span>
+                  <div>
+                    <strong>{item.name}</strong>
+                    <span>
+                      {item.is_default ? "Базовый предмет" : `${item.price} монет`}
+                    </span>
+                  </div>
+                </div>
+
+                <p>{item.description}</p>
+
+                <div className="shop-card__meta">
+                  <span className="account-chip">
+                    {item.active ? "Используется" : item.owned ? "Куплен" : "Не куплен"}
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  className={`button ${item.active ? "button--ghost" : "button--primary"}`}
+                  onClick={() => void handleShopItemAction(item.id)}
+                  disabled={item.active}
+                >
+                  {actionLabel}
+                </button>
+              </article>
+            );
+          })}
+        </div>
+
+        <div className="actions-row">
+          <button className="button button--primary" onClick={() => setView("menu")}>
+            В меню
+          </button>
+          <button className="button button--ghost" onClick={() => setView(currentRoute ? "difficulty" : "menu")}>
+            К уровням
           </button>
         </div>
       </section>
@@ -968,138 +2547,168 @@ function App() {
 
     return (
       <section className="card">
-        <div className="card-badge">Админка контента</div>
-        <h2>Вопросы теперь живут в базе данных</h2>
+        <div className="card-badge">Управление контентом</div>
+        <h2>Вопросы и маршруты</h2>
         <p className="card-text">
-          Здесь можно добавлять, редактировать и удалять вопросы без правки
-          фронтенд-кода. Это уже нормальный CMS-lite для учебного проекта.
+          Добавляйте и редактируйте задания для конкретных языков, сложностей и уровней.
         </p>
 
         <div className="admin-grid">
-          <form className="admin-form" onSubmit={handleSaveQuestion}>
-            <div className="admin-form__header">
-              <h3>{editingQuestionId ? "Редактирование вопроса" : "Новый вопрос"}</h3>
-              {editingQuestionId && (
-                <button
-                  type="button"
-                  className="button button--ghost"
-                  onClick={resetDraftForm}
-                >
-                  Сбросить форму
-                </button>
-              )}
-            </div>
+          <div className="admin-sidebar">
+            <form className="admin-form" onSubmit={handleSaveQuestion}>
+              <div className="admin-form__header">
+                <h3>{editingQuestionId ? "Редактирование вопроса" : "Новый вопрос"}</h3>
+                {editingQuestionId && (
+                  <button
+                    type="button"
+                    className="button button--ghost"
+                    onClick={() => resetDraftForm()}
+                  >
+                    Сбросить форму
+                  </button>
+                )}
+              </div>
 
-            <label className="field">
-              <span>Тема</span>
-              <input
-                value={draft.topic}
-                onChange={(event) =>
-                  setDraft((prev) => ({ ...prev, topic: event.target.value }))
-                }
-              />
-            </label>
-
-            <label className="field">
-              <span>Тип вопроса</span>
-              <select
-                value={draft.type}
-                onChange={(event) =>
-                  setDraft((prev) => ({
-                    ...prev,
-                    type: event.target.value as "choice" | "input",
-                  }))
-                }
-              >
-                <option value="choice">choice</option>
-                <option value="input">input</option>
-              </select>
-            </label>
-
-            <label className="field">
-              <span>Порядок на маршруте</span>
-              <input
-                value={draft.order_index}
-                onChange={(event) =>
-                  setDraft((prev) => ({ ...prev, order_index: event.target.value }))
-                }
-              />
-            </label>
-
-            <label className="field">
-              <span>Текст вопроса</span>
-              <textarea
-                value={draft.prompt}
-                onChange={(event) =>
-                  setDraft((prev) => ({ ...prev, prompt: event.target.value }))
-                }
-              />
-            </label>
-
-            <label className="field">
-              <span>Объяснение после ответа</span>
-              <textarea
-                value={draft.explanation}
-                onChange={(event) =>
-                  setDraft((prev) => ({ ...prev, explanation: event.target.value }))
-                }
-              />
-            </label>
-
-            <label className="field">
-              <span>Placeholder для input-вопроса</span>
-              <input
-                value={draft.placeholder}
-                onChange={(event) =>
-                  setDraft((prev) => ({ ...prev, placeholder: event.target.value }))
-                }
-              />
-            </label>
-
-            {draft.type === "choice" && (
               <label className="field">
-                <span>Варианты ответа, по одному в строке</span>
-                <textarea
-                  value={draft.options_text}
+                <span>Маршрут</span>
+                <select
+                  value={draft.topic}
+                  onChange={(event) => void handleAdminRouteChange(event.target.value)}
+                >
+                  {routes.map((route) => (
+                    <option key={route.topic} value={route.topic}>
+                      {route.language} • {route.difficulty_label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field">
+                <span>Тип вопроса</span>
+                <select
+                  value={draft.type}
                   onChange={(event) =>
-                    setDraft((prev) => ({ ...prev, options_text: event.target.value }))
+                    setDraft((prev) => ({
+                      ...prev,
+                      type: event.target.value as "choice" | "input",
+                    }))
+                  }
+                >
+                  <option value="choice">choice</option>
+                  <option value="input">input</option>
+                </select>
+              </label>
+
+              <label className="field">
+                <span>Порядок в маршруте</span>
+                <input
+                  value={draft.order_index}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, order_index: event.target.value }))
                   }
                 />
               </label>
-            )}
 
-            <label className="field">
-              <span>
-                {draft.type === "choice"
-                  ? "Правильный ответ"
-                  : "Правильные ответы, по одному в строке"}
-              </span>
-              <textarea
-                value={draft.answers_text}
-                onChange={(event) =>
-                  setDraft((prev) => ({ ...prev, answers_text: event.target.value }))
-                }
-              />
-            </label>
+              <label className="field">
+                <span>Текст вопроса</span>
+                <textarea
+                  value={draft.prompt}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, prompt: event.target.value }))
+                  }
+                />
+              </label>
 
-            <button className="button button--primary" type="submit">
-              {editingQuestionId ? "Сохранить вопрос" : "Добавить вопрос"}
-            </button>
-          </form>
+              <label className="field">
+                <span>Подсказка / объяснение</span>
+                <textarea
+                  value={draft.explanation}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, explanation: event.target.value }))
+                  }
+                />
+              </label>
 
-          <div className="admin-list">
-            {adminQuestions.length === 0 ? (
-              <div className="empty-state">В базе пока нет вопросов.</div>
-            ) : (
-              adminQuestions.map((question) => (
-                <article key={question.id} className="admin-question-card">
-                  <div className="admin-question-card__header">
-                    <div>
+              <label className="field">
+                <span>Плейсхолдер для текстового ответа</span>
+                <input
+                  value={draft.placeholder}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, placeholder: event.target.value }))
+                  }
+                />
+              </label>
+
+              {draft.type === "choice" && (
+                <label className="field">
+                  <span>Варианты ответа, по одному в строке</span>
+                  <textarea
+                    value={draft.options_text}
+                    onChange={(event) =>
+                      setDraft((prev) => ({ ...prev, options_text: event.target.value }))
+                    }
+                  />
+                </label>
+              )}
+
+              <label className="field">
+                <span>
+                  {draft.type === "choice"
+                    ? "Правильный ответ"
+                    : "Допустимые ответы, по одному в строке"}
+                </span>
+                <textarea
+                  value={draft.answers_text}
+                  onChange={(event) =>
+                    setDraft((prev) => ({ ...prev, answers_text: event.target.value }))
+                  }
+                />
+              </label>
+
+              <button className="button button--primary" type="submit">
+                {editingQuestionId ? "Сохранить вопрос" : "Добавить вопрос"}
+              </button>
+            </form>
+          </div>
+
+          <div className="admin-list-panel">
+            <div className="admin-list__header">
+              <div>
+                <h3>{currentRoute ? getRouteTitle(currentRoute) : "Список вопросов"}</h3>
+                <p className="card-text">
+                  {currentRoute
+                    ? `Показаны только вопросы маршрута ${getRouteTitle(currentRoute)}.`
+                    : "Выбери маршрут слева, чтобы увидеть его вопросы."}
+                </p>
+              </div>
+              {currentRoute && (
+                <span className="account-chip">
+                  Вопросов: {adminQuestions.length}
+                </span>
+              )}
+            </div>
+
+            <div className="admin-list">
+              {adminQuestions.length === 0 ? (
+                <div className="empty-state">Для этого маршрута пока нет вопросов.</div>
+              ) : (
+                adminQuestions.map((question) => (
+                  <article
+                    key={question.id}
+                    className={`admin-question-row ${
+                      selectedAdminQuestion?.id === question.id ? "admin-question-row--selected" : ""
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      className="admin-question-row__select"
+                      onClick={() => setSelectedAdminQuestionId(question.id)}
+                    >
                       <span className="pill">
-                        #{question.order_index} • {question.type}
+                        Уровень {question.level_index + 1} • Задание {question.task_index + 1}
                       </span>
-                      <h3>{question.prompt}</h3>
-                    </div>
+                      <strong className="admin-question-row__title">{question.prompt}</strong>
+                    </button>
 
                     <div className="actions-row actions-row--compact">
                       <button
@@ -1117,31 +2726,45 @@ function App() {
                         Удалить
                       </button>
                     </div>
+                  </article>
+                ))
+              )}
+            </div>
+
+            {selectedAdminQuestion && (
+              <article className="admin-question-detail">
+                <div className="admin-question-detail__header">
+                  <div>
+                    <span className="pill">
+                      Уровень {selectedAdminQuestion.level_index + 1} • Задание{" "}
+                      {selectedAdminQuestion.task_index + 1}
+                    </span>
+                    <h3>{selectedAdminQuestion.prompt}</h3>
                   </div>
+                </div>
 
-                  <p>{question.explanation}</p>
+                <p>{selectedAdminQuestion.explanation}</p>
 
-                  {question.type === "choice" && (
-                    <div className="list-block">
-                      <strong>Варианты:</strong>
-                      <ul>
-                        {question.options.map((option) => (
-                          <li key={option}>{option}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
+                {selectedAdminQuestion.type === "choice" && (
                   <div className="list-block">
-                    <strong>Правильные ответы:</strong>
+                    <strong>Варианты ответа:</strong>
                     <ul>
-                      {question.correct_answers.map((answer) => (
-                        <li key={answer}>{answer}</li>
+                      {selectedAdminQuestion.options.map((option) => (
+                        <li key={option}>{option}</li>
                       ))}
                     </ul>
                   </div>
-                </article>
-              ))
+                )}
+
+                <div className="list-block">
+                  <strong>Правильные ответы:</strong>
+                  <ul>
+                    {selectedAdminQuestion.correct_answers.map((answer) => (
+                      <li key={answer}>{answer}</li>
+                    ))}
+                  </ul>
+                </div>
+              </article>
             )}
           </div>
         </div>
@@ -1156,21 +2779,19 @@ function App() {
 
       <main className="panel">
         <section className="hero-copy">
-          <p className="eyebrow">{APP_TITLE} • Fullstack Swamp Portfolio</p>
-          <h1>Лягушка выросла из локальной игры в полноценный fullstack</h1>
-          <p className="hero-text">
-            Теперь это не просто фронтенд-квиз. У проекта есть backend API,
-            база данных, серверный прогресс, лидерборд, админка и понятная
-            архитектура для портфолио junior Python/fullstack разработчика.
-          </p>
+          <p className="eyebrow">{APP_TITLE} • Практика по программированию</p>
+          <h1>Маршруты, уровни и прогресс в одном приложении</h1>
         </section>
 
         {renderTopNav()}
         {renderStatusBar()}
 
         {view === "auth" && renderAuthView()}
-        {view === "dashboard" && renderDashboardView()}
+        {view === "menu" && renderMenuView()}
+        {view === "difficulty" && renderDifficultyView()}
         {view === "quiz" && renderQuizView()}
+        {view === "shop" && renderShopView()}
+        {view === "account" && renderAccountView()}
         {view === "leaderboard" && renderLeaderboardView()}
         {view === "admin" && renderAdminView()}
         {view === "result" && renderResultView()}

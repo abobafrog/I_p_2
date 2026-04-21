@@ -8,6 +8,7 @@
 - backend API на `FastAPI`;
 - база данных `SQLite`;
 - регистрация и вход;
+- автоматический 4-значный тэг у профиля, чтобы одинаковые имена не конфликтовали;
 - прогресс пользователя на сервере;
 - таблица лидеров;
 - админка для добавления, редактирования и удаления вопросов;
@@ -43,12 +44,17 @@ SQLite хранит:
 
 ```text
 .
+├── docker/
+│   └── nginx.conf
 ├── backend/
 │   ├── auth.py
 │   ├── db.py
 │   ├── main.py
 │   ├── schemas.py
 │   └── seed_data.py
+├── Dockerfile.backend
+├── Dockerfile.frontend
+├── docker-compose.yml
 ├── public/
 ├── src/
 │   ├── api.ts
@@ -65,6 +71,41 @@ SQLite хранит:
 ```
 
 ## Локальный запуск
+
+### Быстрый запуск через Docker
+
+Если хочется поднимать frontend и backend одной командой:
+
+```bash
+docker compose up --build
+```
+
+После старта будут доступны:
+
+```text
+Frontend: http://127.0.0.1:8080
+Backend API: http://127.0.0.1:8000
+Swagger: http://127.0.0.1:8000/docs
+```
+
+Что делает `docker compose`:
+
+- собирает frontend в production-режиме;
+- поднимает `FastAPI` backend;
+- проксирует запросы `/api` с frontend на backend;
+- сохраняет `SQLite` в named volume `froggy_data`, чтобы база не терялась после перезапуска контейнеров.
+
+Если нужно переопределить админ-логин и пароль, можно запустить так:
+
+```bash
+FROGGY_ADMIN_USERNAME=my_admin FROGGY_ADMIN_PASSWORD=my_secret_password docker compose up --build
+```
+
+Остановка:
+
+```bash
+docker compose down
+```
 
 ### 1. Backend
 
@@ -140,6 +181,9 @@ export FROGGY_ADMIN_PASSWORD=my_secret_password
 - `POST /api/auth/login`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
+
+При регистрации игрок получает тэг из 4 разных цифр, поэтому в интерфейсе логин выглядит как `имя#1234`.
+Для входа новых аккаунтов используйте именно этот формат.
 
 ### Game
 

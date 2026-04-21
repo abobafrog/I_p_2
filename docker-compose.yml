@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      FROGGY_ADMIN_USERNAME: ${FROGGY_ADMIN_USERNAME:-frog_admin}
+      FROGGY_ADMIN_PASSWORD: ${FROGGY_ADMIN_PASSWORD:-admin12345}
+      FROGGY_DB_PATH: /app/data/froggy_coder.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - froggy_data:/app/data
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  froggy_data:
