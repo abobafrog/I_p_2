@@ -73,9 +73,11 @@ export type Credentials = {
 };
 
 export type AuthResponse = {
-  token: string;
   user: User;
+  csrf_token: string;
 };
+
+export type SessionResponse = AuthResponse;
 
 export type AccountUpdatePayload = {
   display_name: string;

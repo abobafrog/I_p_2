@@ -8,7 +8,9 @@
     "dev:frontend": "vite",
     "dev:backend": "uvicorn backend.main:app --reload --port 8000",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:backend": ".venv/bin/pytest tests/test_api.py -q",
+    "test:frontend": "npm run build"
   },
   "dependencies": {
     "react": "^19.1.1",

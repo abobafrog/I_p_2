@@ -1,105 +1,88 @@
-# 🐸 Froggy Coder
+# Froggy Coder
 
-**Froggy Coder** начинался как обучающая игра на `Python + Pygame`, а теперь в репозитории есть и полноценная fullstack-версия для портфолио.
+`Froggy Coder` вырос из локальной `pygame`-игры в fullstack-проект с веб-клиентом, backend API и серверным хранением прогресса.
 
-## Что теперь есть
+## Что есть сейчас
 
-- веб-клиент на `React + Vite + TypeScript`;
-- backend API на `FastAPI`;
-- база данных `SQLite`;
+- frontend на `React + Vite + TypeScript`;
+- backend на `FastAPI`;
+- `SQLite` для пользователей, вопросов, прогресса и результатов;
 - регистрация и вход;
-- автоматический 4-значный тэг у профиля, чтобы одинаковые имена не конфликтовали;
-- прогресс пользователя на сервере;
 - таблица лидеров;
-- админка для добавления, редактирования и удаления вопросов;
-- болотный стиль и связь с оригинальной `pygame`-игрой.
+- магазин и внутриигровая валюта;
+- admin CRUD для вопросов;
+- cookie-based авторизация с CSRF-защитой.
 
-## Архитектура
+## Безопасность и конфиг
 
-### Frontend
+Секреты и runtime-настройки больше не захардкожены в коде.
 
-- отвечает за интерфейс, маршруты внутри приложения и отправку действий пользователя;
-- загружает вопросы, прогресс и лидерборд через API;
-- не хранит вопросы как источник правды.
+1. Скопируйте `.env.example` в `.env`.
+2. Укажите сильный `FROGGY_ADMIN_PASSWORD`.
+3. При необходимости настройте `FROGGY_ALLOWED_ORIGINS` и `FROGGY_COOKIE_SECURE`.
 
-### Backend
+Пример:
 
-- хранит пользователей, сессии, вопросы, попытки, результаты и прогресс;
-- проверяет ответы на сервере;
-- считает результаты и лидерборд;
-- отдает admin CRUD для вопросов.
+```env
+FROGGY_ADMIN_USERNAME=frog_admin
+FROGGY_ADMIN_PASSWORD=replace-with-a-strong-secret
+FROGGY_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
+FROGGY_COOKIE_SECURE=false
+FROGGY_COOKIE_SAMESITE=lax
+VITE_API_BASE_URL=/api
+```
 
-### База данных
+Важно:
 
-SQLite хранит:
-
-- пользователей;
-- токены сессий;
-- вопросы и правильные ответы;
-- попытки ответов;
-- прогресс;
-- результаты забегов.
+- backend больше не использует дефолтный пароль `admin12345`;
+- авторизация работает через `HttpOnly` cookie, а не через `Bearer` в `localStorage`;
+- все `POST`/`PUT`/`DELETE` защищены CSRF-токеном;
+- CORS задаётся через `FROGGY_ALLOWED_ORIGINS`.
 
 ## Структура проекта
 
 ```text
 .
-├── docker/
-│   └── nginx.conf
 ├── backend/
 │   ├── auth.py
+│   ├── config.py
 │   ├── db.py
 │   ├── main.py
 │   ├── schemas.py
 │   └── seed_data.py
-├── Dockerfile.backend
-├── Dockerfile.frontend
-├── docker-compose.yml
-├── public/
+├── docker/
+│   └── nginx.conf
 ├── src/
-│   ├── api.ts
 │   ├── App.tsx
+│   ├── api.ts
 │   ├── main.tsx
 │   ├── styles.css
-│   ├── types.ts
-│   └── vite-env.d.ts
-├── game.py
-├── requirements.txt
-├── package.json
-├── vite.config.ts
-└── render.yaml
+│   └── types.ts
+├── tests/
+│   └── test_api.py
+├── .env.example
+├── docker-compose.yml
+├── Dockerfile.backend
+├── Dockerfile.frontend
+├── render.yaml
+└── requirements.txt
 ```
 
 ## Локальный запуск
 
-### Быстрый запуск через Docker
+### Docker
 
-Если хочется поднимать frontend и backend одной командой:
+`docker compose` читает переменные из `.env` автоматически.
 
 ```bash
 docker compose up --build
 ```
 
-После старта будут доступны:
+После старта:
 
-```text
-Frontend: http://127.0.0.1:8080
-Backend API: http://127.0.0.1:8000
-Swagger: http://127.0.0.1:8000/docs
-```
-
-Что делает `docker compose`:
-
-- собирает frontend в production-режиме;
-- поднимает `FastAPI` backend;
-- проксирует запросы `/api` с frontend на backend;
-- сохраняет `SQLite` в named volume `froggy_data`, чтобы база не терялась после перезапуска контейнеров.
-
-Если нужно переопределить админ-логин и пароль, можно запустить так:
-
-```bash
-FROGGY_ADMIN_USERNAME=my_admin FROGGY_ADMIN_PASSWORD=my_secret_password docker compose up --build
-```
+- frontend: `http://127.0.0.1:8080`
+- backend API: `http://127.0.0.1:8000`
+- Swagger: `http://127.0.0.1:8000/docs`
 
 Остановка:
 
@@ -107,14 +90,7 @@ FROGGY_ADMIN_USERNAME=my_admin FROGGY_ADMIN_PASSWORD=my_secret_password docker c
 docker compose down
 ```
 
-### 1. Backend
-
-Требования:
-
-- Python 3.9+
-- `pip`
-
-Установка и запуск:
+### Backend
 
 ```bash
 python3 -m venv .venv
@@ -123,55 +99,26 @@ pip install -r requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
 
-API будет доступен на:
-
-```text
-http://127.0.0.1:8000
-```
-
-Swagger:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-### 2. Frontend
-
-Требования:
-
-- Node.js
-- npm
-
-Установка и запуск:
+### Frontend
 
 ```bash
 npm install
 npm run dev
 ```
 
-Фронтенд будет доступен на:
+В dev-режиме `Vite` проксирует `/api` на `http://127.0.0.1:8000`.
 
-```text
-http://127.0.0.1:5173
-```
+## Авторизация
 
-`vite.config.ts` уже настроен так, чтобы в dev-режиме проксировать `/api` на `http://127.0.0.1:8000`.
+Схема теперь такая:
 
-## Дефолтный админ
+- `POST /api/auth/register` создаёт аккаунт, выставляет session cookie и возвращает пользователя + `csrf_token`;
+- `POST /api/auth/login` делает то же самое для существующего пользователя;
+- `GET /api/auth/session` восстанавливает состояние текущей сессии;
+- `GET /api/auth/me` возвращает текущего пользователя;
+- `POST /api/auth/logout` удаляет серверную сессию и очищает cookie.
 
-При первом запуске backend создает admin-пользователя, если админов еще нет.
-
-По умолчанию:
-
-- логин: `frog_admin`
-- пароль: `admin12345`
-
-Для нормального запуска лучше переопределить через переменные окружения:
-
-```bash
-export FROGGY_ADMIN_USERNAME=my_admin
-export FROGGY_ADMIN_PASSWORD=my_secret_password
-```
+Frontend отправляет запросы с `credentials: "include"` и больше не хранит токен в `localStorage`.
 
 ## Основные API-эндпоинты
 
@@ -179,17 +126,26 @@ export FROGGY_ADMIN_PASSWORD=my_secret_password
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `GET /api/auth/session`
 - `GET /api/auth/me`
+- `PUT /api/auth/profile`
 - `POST /api/auth/logout`
-
-При регистрации игрок получает тэг из 4 разных цифр, поэтому в интерфейсе логин выглядит как `имя#1234`.
-Для входа новых аккаунтов используйте именно этот формат.
 
 ### Game
 
+- `GET /api/game/routes`
 - `GET /api/game/bootstrap`
+- `GET /api/game/progress`
 - `POST /api/game/reset`
+- `POST /api/game/reset-all`
+- `POST /api/game/select-level`
+- `POST /api/game/reset-level`
 - `POST /api/game/submit-answer`
+
+### Shop
+
+- `GET /api/shop`
+- `POST /api/shop/items/{item_id}`
 
 ### Leaderboard
 
@@ -202,35 +158,48 @@ export FROGGY_ADMIN_PASSWORD=my_secret_password
 - `PUT /api/admin/questions/{id}`
 - `DELETE /api/admin/questions/{id}`
 
+Для admin CRUD backend теперь валидирует `topic` и возвращает `400`, если маршрута не существует.
+
+## Тесты и smoke-checks
+
+Backend smoke/API tests:
+
+```bash
+.venv/bin/pytest tests/test_api.py -q
+```
+
+Frontend smoke-check:
+
+```bash
+npm run build
+```
+
+Сейчас тесты покрывают:
+
+- регистрацию и восстановление cookie-сессии;
+- CSRF-защиту mutating-endpoints;
+- admin CRUD и запрет несуществующих `topic`.
+
 ## Deploy
 
-В репозитории есть `render.yaml` для деплоя на Render:
+В `render.yaml` уже подготовлены:
 
-- backend как Python web service;
-- frontend как static site;
-- SQLite через persistent disk для backend.
+- backend service;
+- static frontend;
+- persistent disk для `SQLite`.
 
-Важно:
+Для продакшена обязательно задайте:
 
-- у Render файловая система по умолчанию эфемерная, поэтому для SQLite нужен persistent disk;
-- persistent disk на Render доступен не на free web service, а на платном плане;
-- для фронтенда нужно указать `VITE_API_BASE_URL` как публичный URL backend.
-
-Базовый сценарий деплоя:
-
-1. Запушить проект в GitHub.
-2. Подключить репозиторий к Render.
-3. Создать Blueprint из `render.yaml`.
-4. Для backend задать секрет `FROGGY_ADMIN_PASSWORD`.
-5. Для frontend задать `VITE_API_BASE_URL`, например `https://your-api.onrender.com/api`.
-6. После деплоя открыть frontend по публичной ссылке Render.
+- `FROGGY_ADMIN_PASSWORD`
+- `FROGGY_ALLOWED_ORIGINS`
+- `FROGGY_COOKIE_SECURE=true`
+- `VITE_API_BASE_URL`
 
 ## Desktop-версия
 
-Старая `pygame`-версия никуда не делась и по-прежнему лежит в [game.py](game.py).  
-Это полезно для портфолио: можно показать эволюцию проекта от локальной игры до fullstack-приложения.
+Старая `pygame`-версия осталась в [game.py](/Users/timofej/Desktop/I_p_2/game.py).
 
-Запуск desktop-версии:
+Запуск:
 
 ```bash
 python3 game.py

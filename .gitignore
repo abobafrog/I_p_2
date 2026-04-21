@@ -6,6 +6,8 @@ __pycache__/
 .pycache/
 .venv/
 data/
+.env
+.pytest_cache/
 *.db
 *.sqlite3
 froggy_save.json

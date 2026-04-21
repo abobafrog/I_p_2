@@ -5,21 +5,20 @@ import swampBackdrop from "../swamp_bg.png";
 import winBackdrop from "../win.jpg";
 import {
   ApiError,
+  applySession,
   buyOrEquipShopItem,
-  clearStoredToken,
+  clearSessionContext,
   createAdminQuestion,
   deleteAdminQuestion,
   getAllProgress,
   getAdminQuestions,
   getBootstrap,
   getLeaderboard,
-  getMe,
   getRoutes,
+  getSession,
   getShop,
-  loadStoredToken,
   login,
   logout,
-  persistToken,
   redeemPromoCode,
   register,
   resetAllProgress,
@@ -30,6 +29,8 @@ import {
   updateProfile,
   updateAdminQuestion,
 } from "./api";
+import { FrogAvatar, FrogFamily, PrimitiveFrog } from "./components/FrogArt";
+import { useRouteHearts } from "./hooks/useRouteHearts";
 import type {
   AccountUpdatePayload,
   AdminQuestion,
@@ -163,271 +164,9 @@ function getUniqueLanguages(routes: RouteOption[]) {
   return Array.from(new Set(routes.map((route) => route.language)));
 }
 
-function getLevelHeartsKey(topic: string, levelIndex: number) {
-  return `${topic}:${levelIndex}`;
-}
-
-type PrimitiveFrogProps = {
-  size?: number;
-  color?: string;
-  hasBow?: boolean;
-  hasTie?: boolean;
-  smaller?: boolean;
-  accessory?: string | null;
-  containAccessory?: boolean;
-  className?: string;
-};
-
-function PrimitiveFrog({
-  size = 120,
-  color = "#32c832",
-  hasBow = false,
-  hasTie = false,
-  smaller = false,
-  accessory = null,
-  containAccessory = false,
-  className,
-}: PrimitiveFrogProps) {
-  const bw = size * 0.625;
-  const bh = size * 0.4375;
-  const bx = size * 0.125;
-  const by = size * 0.3125;
-  const hr = size * 0.225;
-  const hx = size * 0.6875;
-  const hy = size * 0.375;
-  const eyeR = hr * 0.33;
-  const eyeX = hx + hr * 0.28;
-  const eyeY = hy - hr * 0.28;
-  const legOne = { x: size * 0.0625, y: size * 0.5625, w: size * 0.3125, h: size * 0.1875 };
-  const legTwo = { x: size * 0.5625, y: size * 0.5625, w: size * 0.25, h: size * 0.125 };
-  const showBow = hasBow || accessory === "swamp_bow";
-  const bowSize = smaller ? size * 0.1 : size * 0.15;
-  const bowX = hx - hr * 0.5;
-  const bowY = hy - hr * 0.78;
-  const tieSize = smaller ? size * 0.08 : size * 0.12;
-  const tieX = hx;
-  const tieY = hy + hr - hr * 0.3;
-  const showCylinder = accessory === "cylinder";
-  const showCrown = accessory === "lotus_crown";
-  const accessoryPadding =
-    containAccessory && showCrown
-      ? {
-          top: size * 0.22,
-          right: size * 0.1,
-          bottom: size * 0.1,
-          left: size * 0.1,
-        }
-      : containAccessory && showCylinder
-        ? {
-            top: size * 0.2,
-            right: size * 0.1,
-            bottom: size * 0.1,
-            left: size * 0.1,
-          }
-        : { top: 0, right: 0, bottom: 0, left: 0 };
-  const viewBoxX = -accessoryPadding.left;
-  const viewBoxY = -accessoryPadding.top;
-  const viewBoxWidth = size + accessoryPadding.left + accessoryPadding.right;
-  const viewBoxHeight = size + accessoryPadding.top + accessoryPadding.bottom;
-  const hatWidth = size * 0.4;
-  const hatHeight = size * 0.34;
-  const brimWidth = size * 0.54;
-  const brimHeight = Math.max(6, size * 0.05);
-  const brimY = hy - hr * (showCylinder ? 1.14 : 0.96);
-  const hatTop = brimY - hatHeight + size * (showCylinder ? 0.08 : 0.1);
-  const crownBaseY = hy - hr * 0.96;
-
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox={`${viewBoxX} ${viewBoxY} ${viewBoxWidth} ${viewBoxHeight}`}
-      preserveAspectRatio="xMidYMid meet"
-      className={className}
-      aria-hidden="true"
-    >
-      <g>
-        <ellipse
-          cx={legOne.x + legOne.w / 2}
-          cy={legOne.y + legOne.h / 2}
-          rx={legOne.w / 2}
-          ry={legOne.h / 2}
-          fill="#228b22"
-        />
-        <ellipse
-          cx={legTwo.x + legTwo.w / 2}
-          cy={legTwo.y + legTwo.h / 2}
-          rx={legTwo.w / 2}
-          ry={legTwo.h / 2}
-          fill="#228b22"
-        />
-        <ellipse cx={bx + bw / 2} cy={by + bh / 2} rx={bw / 2} ry={bh / 2} fill={color} />
-        <circle cx={hx} cy={hy} r={hr} fill={color} />
-        <circle cx={eyeX} cy={eyeY} r={eyeR} fill="#ffffff" />
-        <circle cx={eyeX + 2} cy={eyeY} r={eyeR * 0.5} fill="#111111" />
-
-        {showCylinder && (
-          <>
-            <rect
-              x={hx - brimWidth / 2}
-              y={brimY}
-              width={brimWidth}
-              height={brimHeight}
-              rx={brimHeight / 2}
-              fill="#111111"
-            />
-            <rect
-              x={hx - hatWidth / 2}
-              y={hatTop}
-              width={hatWidth}
-              height={hatHeight}
-              rx={size * 0.03}
-              fill="#111111"
-            />
-            <rect
-              x={hx - hatWidth / 2}
-              y={hatTop + hatHeight * 0.6}
-              width={hatWidth}
-              height={Math.max(6, size * 0.05)}
-              fill="#d4a017"
-            />
-          </>
-        )}
-
-        {showCrown && (
-          <>
-            <ellipse
-              cx={hx - size * 0.12}
-              cy={crownBaseY - size * 0.09}
-              rx={size * 0.07}
-              ry={size * 0.13}
-              fill="#ffd6e9"
-              transform={`rotate(-28 ${hx - size * 0.12} ${crownBaseY - size * 0.09})`}
-            />
-            <ellipse
-              cx={hx - size * 0.04}
-              cy={crownBaseY - size * 0.14}
-              rx={size * 0.075}
-              ry={size * 0.16}
-              fill="#fff2fb"
-              transform={`rotate(-12 ${hx - size * 0.04} ${crownBaseY - size * 0.14})`}
-            />
-            <ellipse
-              cx={hx}
-              cy={crownBaseY - size * 0.17}
-              rx={size * 0.08}
-              ry={size * 0.18}
-              fill="#ffd1ef"
-            />
-            <ellipse
-              cx={hx + size * 0.04}
-              cy={crownBaseY - size * 0.14}
-              rx={size * 0.075}
-              ry={size * 0.16}
-              fill="#fff2fb"
-              transform={`rotate(12 ${hx + size * 0.04} ${crownBaseY - size * 0.14})`}
-            />
-            <ellipse
-              cx={hx + size * 0.12}
-              cy={crownBaseY - size * 0.09}
-              rx={size * 0.07}
-              ry={size * 0.13}
-              fill="#ffd6e9"
-              transform={`rotate(28 ${hx + size * 0.12} ${crownBaseY - size * 0.09})`}
-            />
-            <circle cx={hx} cy={crownBaseY - size * 0.11} r={size * 0.035} fill="#ffb4d9" />
-            <rect
-              x={hx - size * 0.17}
-              y={crownBaseY - size * 0.01}
-              width={size * 0.34}
-              height={Math.max(6, size * 0.045)}
-              rx={size * 0.025}
-              fill="#f4d77d"
-            />
-            <circle cx={hx - size * 0.11} cy={crownBaseY + size * 0.01} r={size * 0.018} fill="#f8f1b4" />
-            <circle cx={hx + size * 0.11} cy={crownBaseY + size * 0.01} r={size * 0.018} fill="#f8f1b4" />
-          </>
-        )}
-
-        {showBow && (
-          <>
-            <circle cx={bowX - bowSize / 2} cy={bowY} r={bowSize / 2} fill="#ffc0cb" />
-            <circle cx={bowX + bowSize / 2} cy={bowY} r={bowSize / 2} fill="#ffc0cb" />
-            <circle cx={bowX} cy={bowY} r={bowSize / 3} fill="#dc3232" />
-          </>
-        )}
-
-        {hasTie && (
-          <>
-            <polygon
-              points={`${tieX - tieSize / 4},${tieY} ${tieX - tieSize},${tieY - tieSize / 2} ${tieX - tieSize},${tieY + tieSize / 2}`}
-              fill="#6495ed"
-            />
-            <polygon
-              points={`${tieX + tieSize / 4},${tieY} ${tieX + tieSize},${tieY - tieSize / 2} ${tieX + tieSize},${tieY + tieSize / 2}`}
-              fill="#6495ed"
-            />
-            <circle cx={tieX} cy={tieY} r={tieSize / 4} fill="#dc3232" />
-          </>
-        )}
-      </g>
-    </svg>
-  );
-}
-
-type FrogAvatarProps = {
-  accessory?: string | null;
-  className?: string;
-  frogClassName?: string;
-  frogSize?: number;
-};
-
-function FrogAvatar({
-  accessory = null,
-  className,
-  frogClassName,
-  frogSize = 48,
-}: FrogAvatarProps) {
-  return (
-    <span className={className} aria-hidden="true">
-      <PrimitiveFrog
-        size={frogSize}
-        color="#32c832"
-        accessory={accessory}
-        containAccessory
-        className={frogClassName}
-      />
-    </span>
-  );
-}
-
-function FrogFamily() {
-  const frogs = [
-    { size: 88, color: "#32c832", hasTie: true },
-    { size: 88, color: "#64c864", hasBow: true },
-    { size: 64, color: "#96dc96", hasBow: true, smaller: true },
-    { size: 60, color: "#50b450", hasTie: true, smaller: true },
-  ] as const;
-
-  return (
-    <div className="frog-family" aria-hidden="true">
-      {frogs.map((frog, index) => (
-        <span
-          key={`${frog.size}-${frog.color}-${index}`}
-          className="frog-family__member"
-          style={{ width: frog.size, minHeight: 104 }}
-        >
-          <PrimitiveFrog {...frog} />
-        </span>
-      ))}
-    </div>
-  );
-}
-
 function App() {
   const [view, setView] = useState<View>("auth");
   const [authMode, setAuthMode] = useState<AuthMode>("register");
-  const [token, setToken] = useState<string | null>(() => loadStoredToken());
 
   const [user, setUser] = useState<User | null>(null);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
@@ -463,8 +202,14 @@ function App() {
   const [feedbackAction, setFeedbackAction] = useState<FeedbackAction>(null);
   const [pendingProgress, setPendingProgress] = useState<Progress | null>(null);
   const [displayIndex, setDisplayIndex] = useState(0);
-  const [hearts, setHearts] = useState(HEARTS_PER_LEVEL);
-  const [levelHearts, setLevelHearts] = useState<Record<string, number>>({});
+  const {
+    hearts,
+    setHearts,
+    getStoredHearts,
+    syncLevelHearts,
+    clearRouteHearts,
+    resetHeartsState,
+  } = useRouteHearts(HEARTS_PER_LEVEL);
   const [showHint, setShowHint] = useState(false);
   const [roundResult, setRoundResult] = useState<RoundResult | null>(null);
 
@@ -491,9 +236,7 @@ function App() {
     busyLabel.length === 0;
 
   useEffect(() => {
-    if (token) {
-      void hydrateSession(token, "menu");
-    }
+    void hydrateSession("menu", null, true);
   }, []);
 
   function rememberProgress(nextProgress: Progress) {
@@ -509,28 +252,6 @@ function App() {
         accumulator[item.topic] = item;
         return accumulator;
       }, {}),
-    );
-  }
-
-  function getStoredHearts(topic: string, levelIndex: number, fallback = HEARTS_PER_LEVEL) {
-    return levelHearts[getLevelHeartsKey(topic, levelIndex)] ?? fallback;
-  }
-
-  function syncLevelHearts(topic: string, levelIndex: number, nextHearts: number) {
-    const key = getLevelHeartsKey(topic, levelIndex);
-    setLevelHearts((prev) => ({
-      ...prev,
-      [key]: nextHearts,
-    }));
-    setHearts(nextHearts);
-  }
-
-  function clearRouteHearts(topic: string) {
-    const prefix = `${topic}:`;
-    setLevelHearts((prev) =>
-      Object.fromEntries(
-        Object.entries(prev).filter(([key]) => !key.startsWith(prefix)),
-      ),
     );
   }
 
@@ -552,15 +273,13 @@ function App() {
   }
 
   function storeSession(authResponse: AuthResponse) {
-    persistToken(authResponse.token);
-    setToken(authResponse.token);
+    applySession(authResponse);
     setUser(authResponse.user);
     resetAccountForm(authResponse.user);
   }
 
   function clearSession() {
-    clearStoredToken();
-    setToken(null);
+    clearSessionContext();
     setUser(null);
     setRoutes([]);
     setCurrentRoute(null);
@@ -575,8 +294,7 @@ function App() {
     setShopItems([]);
     setAdminQuestions([]);
     setRoundResult(null);
-    setHearts(HEARTS_PER_LEVEL);
-    setLevelHearts({});
+    resetHeartsState();
     setShowHint(false);
     resetQuestionUi();
     resetDraftForm(DEFAULT_TOPIC);
@@ -597,19 +315,23 @@ function App() {
     setErrorMessage("Произошла ошибка. Попробуйте еще раз.");
   }
 
-  async function hydrateSession(activeToken: string, nextView: View = "menu") {
+  async function hydrateSession(
+    nextView: View = "menu",
+    sessionResponse: AuthResponse | null = null,
+    silentAuthFailure = false,
+  ) {
     setBusyLabel("Загружаем профиль...");
     setErrorMessage("");
 
     try {
-      const [me, routeResponse, progressResponse] = await Promise.all([
-        getMe(activeToken),
-        getRoutes(activeToken),
-        getAllProgress(activeToken),
+      const activeSession = sessionResponse ?? (await getSession());
+      storeSession(activeSession);
+
+      const [routeResponse, progressResponse] = await Promise.all([
+        getRoutes(),
+        getAllProgress(),
       ]);
 
-      setUser(me);
-      resetAccountForm(me);
       setRoutes(routeResponse.items);
       replaceProgressCache(progressResponse.items);
       setAccountRouteTopic((prev) =>
@@ -625,6 +347,12 @@ function App() {
       );
       setView(nextView);
     } catch (error) {
+      if (silentAuthFailure && error instanceof ApiError && error.status === 401) {
+        clearSession();
+        setErrorMessage("");
+        return;
+      }
+
       handleApiFailure(error, true);
     } finally {
       setBusyLabel("");
@@ -632,7 +360,7 @@ function App() {
   }
 
   async function loadRoute(route: RouteOption, nextView: View = "difficulty") {
-    if (!token) {
+    if (!user) {
       return false;
     }
 
@@ -642,7 +370,7 @@ function App() {
 
     try {
       const [bootstrap, leaderboardResponse] = await Promise.all([
-        getBootstrap(token, route.topic),
+        getBootstrap(route.topic),
         getLeaderboard(route.topic, leaderboardMetric),
       ]);
 
@@ -702,7 +430,7 @@ function App() {
           ? "Вход выполнен. Можно продолжать обучение."
           : `Аккаунт создан. Для входа используйте логин ${response.user.full_username}.`,
       );
-      await hydrateSession(response.token, "menu");
+      await hydrateSession("menu", response);
     } catch (error) {
       handleApiFailure(error);
     } finally {
@@ -711,7 +439,7 @@ function App() {
   }
 
   async function handleLogout() {
-    if (!token) {
+    if (!user) {
       clearSession();
       return;
     }
@@ -720,7 +448,7 @@ function App() {
     setErrorMessage("");
 
     try {
-      await logout(token);
+      await logout();
     } catch {
       // Игнорируем сетевые ошибки logout и все равно чистим локальную сессию.
     } finally {
@@ -774,7 +502,7 @@ function App() {
   }
 
   async function openAdmin(topicOverride?: string) {
-    if (!token || !user?.is_admin) {
+    if (!user?.is_admin) {
       return;
     }
 
@@ -782,7 +510,7 @@ function App() {
     setErrorMessage("");
 
     try {
-      const routeResponse = await getRoutes(token);
+      const routeResponse = await getRoutes();
       const nextRoutes = routeResponse.items;
       const route =
         nextRoutes.find((item) => item.topic === topicOverride) ??
@@ -796,7 +524,7 @@ function App() {
         return;
       }
 
-      const data = await getAdminQuestions(token, route.topic);
+      const data = await getAdminQuestions(route.topic);
       setRoutes(nextRoutes);
       setCurrentRoute(route);
       setSelectedLanguage(route.language);
@@ -824,7 +552,7 @@ function App() {
   }
 
   async function openShop() {
-    if (!token) {
+    if (!user) {
       return;
     }
 
@@ -832,7 +560,7 @@ function App() {
     setErrorMessage("");
 
     try {
-      const response = await getShop(token);
+      const response = await getShop();
       setUser(response.user);
       setShopItems(response.items);
       if (response.message) {
@@ -885,7 +613,7 @@ function App() {
 
   async function handleAccountSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token || !user) {
+    if (!user) {
       return;
     }
 
@@ -923,7 +651,7 @@ function App() {
         payload.new_password = newPassword;
       }
 
-      const nextUser = await updateProfile(token, payload);
+      const nextUser = await updateProfile(payload);
       setUser(nextUser);
       resetAccountForm(nextUser);
       setSuccessMessage("Профиль обновлен.");
@@ -940,7 +668,7 @@ function App() {
 
   async function handlePromoSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token) {
+    if (!user) {
       return;
     }
 
@@ -957,7 +685,7 @@ function App() {
 
     try {
       const payload: PromoRedeemPayload = { code };
-      const response = await redeemPromoCode(token, payload);
+      const response = await redeemPromoCode(payload);
       setUser(response.user);
       replaceProgressCache(response.progresses);
       if (currentRoute) {
@@ -982,7 +710,7 @@ function App() {
   }
 
   async function handleShopItemAction(itemId: string) {
-    if (!token) {
+    if (!user) {
       return;
     }
 
@@ -991,7 +719,7 @@ function App() {
     setSuccessMessage("");
 
     try {
-      const response = await buyOrEquipShopItem(token, itemId);
+      const response = await buyOrEquipShopItem(itemId);
       setUser(response.user);
       setShopItems(response.items);
       setSuccessMessage(response.message ?? "Данные магазина обновлены.");
@@ -1011,7 +739,7 @@ function App() {
   }
 
   async function startLevel(levelIndex: number) {
-    if (!token || !progress || !currentRoute) {
+    if (!user || !progress || !currentRoute) {
       return;
     }
 
@@ -1023,7 +751,7 @@ function App() {
       let nextProgress = progress;
 
       if (levelIndex !== progress.current_level_index) {
-        nextProgress = await selectLevel(token, {
+        nextProgress = await selectLevel({
           topic: currentRoute.topic,
           level_index: levelIndex,
         });
@@ -1055,7 +783,7 @@ function App() {
   }
 
   async function resetCurrentRoute(openQuizImmediately = false) {
-    if (!token || !currentRoute) {
+    if (!user || !currentRoute) {
       return;
     }
 
@@ -1064,7 +792,7 @@ function App() {
     setSuccessMessage("");
 
     try {
-      const nextProgress = await resetProgress(token, currentRoute.topic);
+      const nextProgress = await resetProgress(currentRoute.topic);
       setProgress(nextProgress);
       rememberProgress(nextProgress);
       setDisplayIndex(nextProgress.current_index);
@@ -1082,7 +810,7 @@ function App() {
   }
 
   async function handleResetAllProgress() {
-    if (!token) {
+    if (!user) {
       return;
     }
 
@@ -1098,11 +826,10 @@ function App() {
     setSuccessMessage("");
 
     try {
-      const response = await resetAllProgress(token);
+      const response = await resetAllProgress();
       replaceProgressCache(response.items);
       setRoundResult(null);
-      setHearts(HEARTS_PER_LEVEL);
-      setLevelHearts({});
+      resetHeartsState();
       setShowHint(false);
       resetQuestionUi();
 
@@ -1127,7 +854,7 @@ function App() {
   }
 
   async function handleSubmitAnswer() {
-    if (!token || !currentRoute || !currentQuestion || !canSubmitAnswer) {
+    if (!user || !currentRoute || !currentQuestion || !canSubmitAnswer) {
       return;
     }
 
@@ -1135,7 +862,7 @@ function App() {
     setErrorMessage("");
 
     try {
-      const result = await submitAnswer(token, {
+      const result = await submitAnswer({
         topic: currentRoute.topic,
         question_id: currentQuestion.id,
         answer: currentAnswer,
@@ -1161,7 +888,7 @@ function App() {
       } else {
         const remainingHearts = hearts - 1;
         if (remainingHearts <= 0) {
-          nextProgress = await resetLevel(token, { topic: currentRoute.topic });
+          nextProgress = await resetLevel({ topic: currentRoute.topic });
           nextFeedbackAction = "level-reset";
           syncLevelHearts(currentRoute.topic, currentQuestion.level_index, 0);
         } else {
@@ -1270,7 +997,7 @@ function App() {
 
   async function handleSaveQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token || !user?.is_admin) {
+    if (!user?.is_admin) {
       return;
     }
 
@@ -1282,10 +1009,10 @@ function App() {
       const payload = buildPayloadFromDraft();
 
       if (editingQuestionId) {
-        await updateAdminQuestion(token, editingQuestionId, payload);
+        await updateAdminQuestion(editingQuestionId, payload);
         setSuccessMessage("Вопрос обновлен.");
       } else {
-        await createAdminQuestion(token, payload);
+        await createAdminQuestion(payload);
         setSuccessMessage("Вопрос добавлен.");
       }
 
@@ -1299,7 +1026,7 @@ function App() {
   }
 
   async function handleDeleteQuestion(questionId: number) {
-    if (!token || !user?.is_admin) {
+    if (!user?.is_admin) {
       return;
     }
 
@@ -1313,7 +1040,7 @@ function App() {
     setSuccessMessage("");
 
     try {
-      await deleteAdminQuestion(token, questionId);
+      await deleteAdminQuestion(questionId);
       if (editingQuestionId === questionId) {
         resetDraftForm();
       }

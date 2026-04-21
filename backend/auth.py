@@ -2,18 +2,22 @@ import hashlib
 import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Dict, Optional
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, HTTPException, Request, Response, status
 from sqlite3 import Connection
 
-from backend.db import delete_expired_sessions, get_db, get_session_user, serialize_user_row
+from backend.config import (
+    CSRF_COOKIE_NAME,
+    SESSION_COOKIE_NAME,
+    get_cookie_samesite,
+    get_cookie_secure,
+)
+from backend.db import delete_expired_sessions, get_db, get_session_record, serialize_user_row
 
 
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 390000
-bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def utc_now() -> datetime:
@@ -36,31 +40,107 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
     return hmac.compare_digest(computed_hash, expected_hash)
 
 
-def create_session_token() -> tuple:
-    token = secrets.token_urlsafe(32)
+def create_session_tokens() -> tuple[str, str, str]:
+    session_token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
     expires_at = utc_now() + timedelta(days=SESSION_DAYS)
-    return token, expires_at.isoformat()
+    return session_token, csrf_token, expires_at.isoformat()
 
 
-def require_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+def set_session_cookies(response: Response, session_token: str, csrf_token: str) -> None:
+    max_age = SESSION_DAYS * 24 * 60 * 60
+    secure = get_cookie_secure()
+    samesite = get_cookie_samesite()
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_token,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+        max_age=max_age,
+        path="/",
+    )
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        httponly=False,
+        secure=secure,
+        samesite=samesite,
+        max_age=max_age,
+        path="/",
+    )
+
+
+def clear_session_cookies(response: Response) -> None:
+    secure = get_cookie_secure()
+    samesite = get_cookie_samesite()
+
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        secure=secure,
+        samesite=samesite,
+    )
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        path="/",
+        secure=secure,
+        samesite=samesite,
+    )
+
+
+def require_session(
+    request: Request,
     conn: Connection = Depends(get_db),
-) -> dict:
-    if credentials is None or not credentials.credentials:
+) -> Dict:
+    session_token = (request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    if not session_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Нужна авторизация.",
         )
 
     delete_expired_sessions(conn)
-    user = get_session_user(conn, credentials.credentials)
-    if user is None:
+    session = get_session_record(conn, session_token)
+    if session is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Сессия истекла или токен неверный.",
         )
 
-    return serialize_user_row(user)
+    return {
+        "token": session["session_token"],
+        "csrf_token": session["session_csrf_token"],
+        "user": serialize_user_row(session),
+    }
+
+
+def require_csrf(
+    request: Request,
+    session: Dict = Depends(require_session),
+) -> Dict:
+    header_token = (request.headers.get("X-CSRF-Token") or "").strip()
+    cookie_token = (request.cookies.get(CSRF_COOKIE_NAME) or "").strip()
+    session_token = str(session.get("csrf_token") or "").strip()
+
+    if (
+        not header_token
+        or not cookie_token
+        or not session_token
+        or not hmac.compare_digest(header_token, cookie_token)
+        or not hmac.compare_digest(header_token, session_token)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF token отсутствует или неверен.",
+        )
+
+    return session
+
+
+def require_user(session: Dict = Depends(require_session)) -> dict:
+    return session["user"]
 
 
 def require_admin(user: dict = Depends(require_user)) -> dict:

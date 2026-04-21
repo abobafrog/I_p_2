@@ -11,6 +11,12 @@ services:
         value: frog_admin
       - key: FROGGY_ADMIN_PASSWORD
         sync: false
+      - key: FROGGY_ALLOWED_ORIGINS
+        sync: false
+      - key: FROGGY_COOKIE_SECURE
+        value: "true"
+      - key: FROGGY_COOKIE_SAMESITE
+        value: lax
       - key: FROGGY_DB_PATH
         value: /opt/render/project/src/data/froggy_coder.db
     disk:

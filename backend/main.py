@@ -1,19 +1,22 @@
-import os
+from contextlib import asynccontextmanager
 from typing import Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPAuthorizationCredentials
 from sqlite3 import Connection, IntegrityError
 
 from backend.auth import (
-    bearer_scheme,
-    create_session_token,
+    clear_session_cookies,
+    create_session_tokens,
     hash_password,
+    require_csrf,
     require_admin,
+    require_session,
     require_user,
+    set_session_cookies,
     verify_password,
 )
+from backend.config import get_admin_password, get_admin_username, get_allowed_origins
 from backend.db import (
     apply_answer_result,
     build_full_username,
@@ -25,7 +28,6 @@ from backend.db import (
     create_user,
     delete_question,
     delete_session,
-    delete_expired_sessions,
     evaluate_answer,
     generate_unique_user_tag,
     get_correct_answers,
@@ -69,6 +71,7 @@ from backend.schemas import (
     PromoRedeemResponse,
     ProgressOut,
     RouteListResponse,
+    SessionOut,
     SelectLevelIn,
     ShopResponse,
     TopicIn,
@@ -78,32 +81,12 @@ from backend.schemas import (
 
 
 TOPIC_SLUG = AVAILABLE_ROUTES[0]["topic"] if AVAILABLE_ROUTES else "python-easy"
-DEFAULT_ADMIN_USERNAME = os.getenv("FROGGY_ADMIN_USERNAME", "frog_admin")
-DEFAULT_ADMIN_PASSWORD = os.getenv("FROGGY_ADMIN_PASSWORD", "admin12345")
-
-app = FastAPI(
-    title="Froggy Coder API",
-    version="0.1.0",
-    description="Backend API for the Froggy Coder portfolio project.",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
-    allow_origin_regex=r"https://.*\.onrender\.com",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+DEFAULT_ADMIN_USERNAME = get_admin_username()
+DEFAULT_ADMIN_PASSWORD = get_admin_password()
 
 
-@app.on_event("startup")
-def startup_event() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     init_db()
     admin_salt, admin_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
     bootstrap_database(
@@ -111,8 +94,23 @@ def startup_event() -> None:
         admin_password_hash=admin_hash,
         admin_password_salt=admin_salt,
     )
+    yield
 
 
+app = FastAPI(
+    title="Froggy Coder API",
+    version="0.1.0",
+    description="Backend API for the Froggy Coder portfolio project.",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_allowed_origins(),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-CSRF-Token"],
+)
 def sanitize_credentials(payload: CredentialsIn) -> Dict:
     username = payload.username.strip()
     password = payload.password.strip()
@@ -217,6 +215,17 @@ def sanitize_login_credentials(payload: CredentialsIn) -> Dict:
     return cleaned
 
 
+def ensure_known_topic(topic: str) -> Dict:
+    normalized_topic = topic.strip().lower()
+    route_meta = get_route_meta(normalized_topic)
+    if route_meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Такого topic не существует.",
+        )
+    return route_meta
+
+
 def sanitize_admin_payload(payload: AdminQuestionIn) -> Dict:
     topic = payload.topic.strip().lower()
     question_type = payload.type.strip().lower()
@@ -256,7 +265,7 @@ def sanitize_admin_payload(payload: AdminQuestionIn) -> Dict:
             )
         options = []
 
-    route_meta = get_route_meta(topic)
+    route_meta = ensure_known_topic(topic)
     order_index = payload.order_index
     level_index = max(0, order_index // 5)
     task_index = max(0, order_index % 5)
@@ -267,8 +276,8 @@ def sanitize_admin_payload(payload: AdminQuestionIn) -> Dict:
 
     return {
         "topic": topic,
-        "language": route_meta["language"] if route_meta is not None else "",
-        "difficulty": route_meta["difficulty"] if route_meta is not None else "",
+        "language": route_meta["language"],
+        "difficulty": route_meta["difficulty"],
         "level_index": level_index,
         "task_index": task_index,
         "type": question_type,
@@ -280,6 +289,8 @@ def sanitize_admin_payload(payload: AdminQuestionIn) -> Dict:
         "options": options,
         "correct_answers": correct_answers,
     }
+
+
 def ensure_topic_access(topic: str, user: dict) -> str:
     normalized_topic = topic.strip().lower()
     if not can_user_access_topic(user["id"], normalized_topic):
@@ -304,7 +315,11 @@ def game_routes(
 
 
 @app.post("/api/auth/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: CredentialsIn, conn: Connection = Depends(get_db)):
+def register(
+    payload: CredentialsIn,
+    response: Response,
+    conn: Connection = Depends(get_db),
+):
     cleaned = sanitize_registration_credentials(payload)
     tag = generate_unique_user_tag(conn)
     login_handle = build_full_username(cleaned["username"], tag)
@@ -326,13 +341,18 @@ def register(payload: CredentialsIn, conn: Connection = Depends(get_db)):
             detail="Не удалось создать пользователя.",
         ) from exc
 
-    token, expires_at = create_session_token()
-    create_session(conn, user["id"], token, expires_at)
-    return {"token": token, "user": serialize_user_row(user)}
+    session_token, csrf_token, expires_at = create_session_tokens()
+    create_session(conn, user["id"], session_token, csrf_token, expires_at)
+    set_session_cookies(response, session_token, csrf_token)
+    return {"user": serialize_user_row(user), "csrf_token": csrf_token}
 
 
 @app.post("/api/auth/login", response_model=AuthResponse)
-def login(payload: CredentialsIn, conn: Connection = Depends(get_db)):
+def login(
+    payload: CredentialsIn,
+    response: Response,
+    conn: Connection = Depends(get_db),
+):
     cleaned = sanitize_login_credentials(payload)
     user = get_user_by_username(conn, cleaned["username"])
     if user is None and "#" in cleaned["username"]:
@@ -349,10 +369,18 @@ def login(payload: CredentialsIn, conn: Connection = Depends(get_db)):
             detail="Неверный логин или пароль.",
         )
 
-    delete_expired_sessions(conn)
-    token, expires_at = create_session_token()
-    create_session(conn, user["id"], token, expires_at)
-    return {"token": token, "user": serialize_user_row(user)}
+    session_token, csrf_token, expires_at = create_session_tokens()
+    create_session(conn, user["id"], session_token, csrf_token, expires_at)
+    set_session_cookies(response, session_token, csrf_token)
+    return {"user": serialize_user_row(user), "csrf_token": csrf_token}
+
+
+@app.get("/api/auth/session", response_model=SessionOut)
+def session_state(session: dict = Depends(require_session)):
+    return {
+        "user": session["user"],
+        "csrf_token": session["csrf_token"],
+    }
 
 
 @app.get("/api/auth/me", response_model=UserOut)
@@ -363,9 +391,11 @@ def me(user: dict = Depends(require_user)):
 @app.put("/api/auth/profile", response_model=UserOut)
 def update_profile(
     payload: ProfileUpdateIn,
+    session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     cleaned = sanitize_profile_payload(payload)
     user_row = get_user_by_id(conn, user["id"])
 
@@ -415,14 +445,14 @@ def update_profile(
 
 @app.post("/api/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    response: Response,
+    session: dict = Depends(require_csrf),
     conn: Connection = Depends(get_db),
-    user: dict = Depends(require_user),
 ):
-    _ = user
-    if credentials is not None and credentials.credentials:
-        delete_session(conn, credentials.credentials)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    delete_session(conn, session["token"])
+    clear_session_cookies(response)
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
 
 
 @app.get("/api/game/bootstrap", response_model=BootstrapResponse)
@@ -466,9 +496,11 @@ def shop_bootstrap(
 @app.post("/api/shop/items/{item_id}", response_model=ShopResponse)
 def shop_buy_or_equip(
     item_id: str,
+    session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     try:
         result = buy_or_equip_item(conn, user["id"], item_id.strip().lower())
     except ValueError as exc:
@@ -497,9 +529,11 @@ def shop_buy_or_equip(
 @app.post("/api/auth/redeem-promo", response_model=PromoRedeemResponse)
 def redeem_promo(
     payload: PromoRedeemIn,
+    session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     try:
         result = redeem_promo_code(conn, user["id"], payload.code)
     except ValueError as exc:
@@ -519,27 +553,33 @@ def redeem_promo(
 @app.post("/api/game/reset", response_model=ProgressOut)
 def reset_game(
     topic: str = Query(default=TOPIC_SLUG),
+    session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     topic = ensure_topic_access(topic, user)
     return reset_progress(conn, user["id"], topic)
 
 
 @app.post("/api/game/reset-all", response_model=ProgressListResponse)
 def reset_all_game_progress(
+    session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     return {"items": reset_all_progress(conn, user["id"])}
 
 
 @app.post("/api/game/select-level", response_model=ProgressOut)
 def select_level(
     payload: SelectLevelIn,
+    session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     topic = ensure_topic_access(payload.topic, user)
     progress = ensure_progress_row(conn, user["id"], topic)
     current = serialize_progress(conn, progress, topic)
@@ -556,9 +596,11 @@ def select_level(
 @app.post("/api/game/reset-level", response_model=ProgressOut)
 def reset_current_level(
     payload: TopicIn,
+    session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     topic = ensure_topic_access(payload.topic, user)
     return reset_level_progress(conn, user["id"], topic)
 
@@ -566,9 +608,11 @@ def reset_current_level(
 @app.post("/api/game/submit-answer", response_model=AnswerResponse)
 def submit_answer(
     payload: SubmitAnswerIn,
+    session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     topic = ensure_topic_access(payload.topic, user)
     progress_row = ensure_progress_row(conn, user["id"], topic)
     current_question = get_question_by_index(conn, topic, progress_row["current_index"])
@@ -637,15 +681,19 @@ def admin_list_questions(
     conn: Connection = Depends(get_db),
 ):
     _ = admin
-    return list_admin_questions(conn, topic)
+    normalized_topic = topic.strip().lower()
+    ensure_known_topic(normalized_topic)
+    return list_admin_questions(conn, normalized_topic)
 
 
 @app.post("/api/admin/questions", status_code=status.HTTP_201_CREATED)
 def admin_create_question(
     payload: AdminQuestionIn,
+    session: dict = Depends(require_csrf),
     admin: dict = Depends(require_admin),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     _ = admin
     question = create_question(conn, sanitize_admin_payload(payload))
     return question
@@ -655,9 +703,11 @@ def admin_create_question(
 def admin_update_question(
     question_id: int,
     payload: AdminQuestionIn,
+    session: dict = Depends(require_csrf),
     admin: dict = Depends(require_admin),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     _ = admin
     row = get_question_by_id(conn, question_id)
     if row is None:
@@ -671,9 +721,11 @@ def admin_update_question(
 @app.delete("/api/admin/questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_question(
     question_id: int,
+    session: dict = Depends(require_csrf),
     admin: dict = Depends(require_admin),
     conn: Connection = Depends(get_db),
 ):
+    _ = session
     _ = admin
     row = get_question_by_id(conn, question_id)
     if row is None:

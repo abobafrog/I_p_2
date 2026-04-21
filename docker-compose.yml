@@ -5,7 +5,10 @@ services:
       dockerfile: Dockerfile.backend
     environment:
       FROGGY_ADMIN_USERNAME: ${FROGGY_ADMIN_USERNAME:-frog_admin}
-      FROGGY_ADMIN_PASSWORD: ${FROGGY_ADMIN_PASSWORD:-admin12345}
+      FROGGY_ADMIN_PASSWORD: ${FROGGY_ADMIN_PASSWORD:?FROGGY_ADMIN_PASSWORD is required}
+      FROGGY_ALLOWED_ORIGINS: ${FROGGY_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173}
+      FROGGY_COOKIE_SECURE: ${FROGGY_COOKIE_SECURE:-false}
+      FROGGY_COOKIE_SAMESITE: ${FROGGY_COOKIE_SAMESITE:-lax}
       FROGGY_DB_PATH: /app/data/froggy_coder.db
     ports:
       - "8000:8000"

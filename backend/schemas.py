@@ -28,8 +28,12 @@ class UserOut(BaseModel):
 
 
 class AuthResponse(BaseModel):
-    token: str
     user: UserOut
+    csrf_token: str
+
+
+class SessionOut(AuthResponse):
+    pass
 
 
 class QuestionOut(BaseModel):

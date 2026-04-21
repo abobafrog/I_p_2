@@ -1,4 +1,5 @@
-import os
+from __future__ import annotations
+
 import sqlite3
 import json
 import re
@@ -9,6 +10,7 @@ from pathlib import Path
 from sqlite3 import Connection
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from backend.config import get_database_path
 from backend.game_meta import LEADERBOARD_METRICS, get_shop_item
 from backend.seed_data import (
     AVAILABLE_ROUTES,
@@ -21,7 +23,6 @@ from backend.seed_data import (
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DB_PATH = BASE_DIR / "data" / "froggy_coder.db"
 QUESTIONS_COLUMN_DEFS = {
     "language": "TEXT NOT NULL DEFAULT ''",
     "difficulty": "TEXT NOT NULL DEFAULT ''",
@@ -40,6 +41,9 @@ USERS_COLUMN_DEFS = {
     "inventory_json": "TEXT NOT NULL DEFAULT '[\"default\"]'",
     "active_skin": "TEXT NOT NULL DEFAULT 'default'",
     "redeemed_promos_json": "TEXT NOT NULL DEFAULT '[]'",
+}
+SESSIONS_COLUMN_DEFS = {
+    "csrf_token": "TEXT NOT NULL DEFAULT ''",
 }
 TAG_DIGITS = "0123456789"
 TAG_LENGTH = 4
@@ -63,15 +67,6 @@ SMART_QUOTES_TRANSLATION = str.maketrans(
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def get_database_path() -> Path:
-    override = os.getenv("FROGGY_DB_PATH")
-    if override:
-        return Path(override)
-    return DEFAULT_DB_PATH
-
-
 def get_connection() -> Connection:
     db_path = get_database_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +104,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 token TEXT NOT NULL UNIQUE,
+                csrf_token TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
@@ -181,6 +177,7 @@ def init_db() -> None:
             """
         )
         ensure_user_columns(conn)
+        ensure_session_columns(conn)
         ensure_question_columns(conn)
         ensure_progress_columns(conn)
         ensure_user_identity_columns(conn)
@@ -201,6 +198,20 @@ def ensure_user_columns(conn: Connection) -> None:
 
         conn.execute(
             f"ALTER TABLE users ADD COLUMN {column_name} {column_def}"
+        )
+
+
+def ensure_session_columns(conn: Connection) -> None:
+    existing_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+
+    for column_name, column_def in SESSIONS_COLUMN_DEFS.items():
+        if column_name in existing_columns:
+            continue
+
+        conn.execute(
+            f"ALTER TABLE sessions ADD COLUMN {column_name} {column_def}"
         )
 
 
@@ -774,13 +785,19 @@ def delete_expired_sessions(conn: Connection) -> None:
     conn.commit()
 
 
-def create_session(conn: Connection, user_id: int, token: str, expires_at: str) -> None:
+def create_session(
+    conn: Connection,
+    user_id: int,
+    token: str,
+    csrf_token: str,
+    expires_at: str,
+) -> None:
     conn.execute(
         """
-        INSERT INTO sessions (user_id, token, created_at, expires_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO sessions (user_id, token, csrf_token, created_at, expires_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (user_id, token, utc_now_iso(), expires_at),
+        (user_id, token, csrf_token, utc_now_iso(), expires_at),
     )
     conn.commit()
 
@@ -790,16 +807,25 @@ def delete_session(conn: Connection, token: str) -> None:
     conn.commit()
 
 
-def get_session_user(conn: Connection, token: str):
+def get_session_record(conn: Connection, token: str):
     return conn.execute(
         """
-        SELECT users.*
+        SELECT
+            sessions.token AS session_token,
+            sessions.csrf_token AS session_csrf_token,
+            sessions.expires_at AS session_expires_at,
+            users.*
         FROM sessions
         JOIN users ON users.id = sessions.user_id
         WHERE sessions.token = ? AND sessions.expires_at > ?
         """,
         (token, utc_now_iso()),
     ).fetchone()
+
+
+def get_session_user(conn: Connection, token: str):
+    session = get_session_record(conn, token)
+    return session
 
 
 def normalize_answer(value: str) -> str:
