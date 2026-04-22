@@ -1,10 +1,15 @@
 from contextlib import asynccontextmanager
+from io import BytesIO
+from pathlib import Path
 from typing import Dict
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlite3 import Connection, IntegrityError
 
+import backend.translation as translation
 from backend.auth import (
     clear_session_cookies,
     create_session_tokens,
@@ -18,20 +23,23 @@ from backend.auth import (
 )
 from backend.config import get_admin_password, get_admin_username, get_allowed_origins
 from backend.db import (
+    DAILY_CHALLENGE_REWARD_COINS,
     apply_answer_result,
-    build_full_username,
     buy_or_equip_item,
     bootstrap_database,
     can_user_access_topic,
     create_question,
     create_session,
-    create_user,
+    create_user_with_generated_tag,
     delete_question,
+    delete_promo_code_record,
     delete_session,
     evaluate_answer,
-    generate_unique_user_tag,
+    get_daily_challenge_attempt,
+    get_daily_challenge_row,
     get_correct_answers,
     get_db,
+    get_promo_code,
     get_user_by_display_name_and_tag,
     get_question_by_id,
     get_question_by_index,
@@ -41,19 +49,26 @@ from backend.db import (
     is_valid_user_tag,
     init_db,
     list_admin_questions,
+    list_daily_challenge_leaderboard,
     list_leaderboard,
+    list_promo_codes,
     list_public_questions,
     list_route_options,
     list_user_progress,
+    normalize_question_explanation,
     redeem_promo_code,
     reset_level_progress,
     reset_all_progress,
     reset_progress,
     select_level_progress,
+    serialize_public_question,
     serialize_user_row,
     serialize_progress,
+    submit_daily_challenge_answer,
+    utc_now_iso,
     update_question,
     update_user_profile,
+    upsert_promo_code,
     ensure_progress_row,
 )
 from backend.game_meta import get_metric_meta, serialize_shop_items
@@ -64,8 +79,14 @@ from backend.schemas import (
     AuthResponse,
     BootstrapResponse,
     CredentialsIn,
+    DailyChallengeResponse,
+    DailyChallengeSubmitIn,
+    DailyChallengeSubmitResponse,
     LeaderboardResponse,
     ProfileUpdateIn,
+    PromoCodeIn,
+    PromoCodeListResponse,
+    PromoCodeOut,
     ProgressListResponse,
     PromoRedeemIn,
     PromoRedeemResponse,
@@ -74,6 +95,8 @@ from backend.schemas import (
     SessionOut,
     SelectLevelIn,
     ShopResponse,
+    TranslationBatchIn,
+    TranslationBatchOut,
     TopicIn,
     SubmitAnswerIn,
     UserOut,
@@ -84,6 +107,105 @@ TOPIC_SLUG = AVAILABLE_ROUTES[0]["topic"] if AVAILABLE_ROUTES else "python-easy"
 DEFAULT_ADMIN_USERNAME = get_admin_username()
 DEFAULT_ADMIN_PASSWORD = get_admin_password()
 
+VALIDATION_FIELD_LABELS = {
+    "username": "Имя пользователя",
+    "password": "Пароль",
+    "display_name": "Имя пользователя",
+    "current_password": "Текущий пароль",
+    "new_password": "Новый пароль",
+    "locale": "Язык",
+    "topic": "Тема",
+    "type": "Тип вопроса",
+    "prompt": "Формулировка вопроса",
+    "explanation": "Пояснение",
+    "placeholder": "Подсказка",
+    "code": "Код",
+    "description": "Описание",
+    "answer": "Ответ",
+    "options": "Варианты ответа",
+    "correct_answers": "Правильные ответы",
+    "order_index": "Порядок",
+    "reward_coins": "Количество монет",
+    "unlock_all_levels": "Разблокировать все уровни",
+    "is_active": "Активность",
+}
+
+
+def pluralize_ru(value: int, one: str, few: str, many: str) -> str:
+    absolute = abs(value)
+    remainder_10 = absolute % 10
+    remainder_100 = absolute % 100
+
+    if remainder_10 == 1 and remainder_100 != 11:
+        return one
+
+    if 2 <= remainder_10 <= 4 and not 12 <= remainder_100 <= 14:
+        return few
+
+    return many
+
+
+def get_validation_field_label(location: object) -> str:
+    if not isinstance(location, (list, tuple)):
+        return "Поле"
+
+    skipped = {"body", "query", "path", "header", "cookie"}
+    for part in reversed(location):
+        if isinstance(part, int):
+            continue
+
+        field_name = str(part)
+        if field_name in skipped:
+            continue
+
+        return VALIDATION_FIELD_LABELS.get(
+            field_name,
+            field_name.replace("_", " ").capitalize(),
+        )
+
+    return "Поле"
+
+
+def translate_validation_error(error: dict) -> str:
+    field_label = get_validation_field_label(error.get("loc"))
+    error_type = str(error.get("type", ""))
+    context = error.get("ctx") or {}
+
+    if error_type == "missing":
+        return f"Поле «{field_label}» обязательно."
+
+    if error_type == "string_too_short":
+        min_length = context.get("min_length")
+        if isinstance(min_length, int):
+            return (
+                f"{field_label} должен быть не короче {min_length} "
+                f"{pluralize_ru(min_length, 'символ', 'символа', 'символов')}."
+            )
+        return f"{field_label} слишком короткий."
+
+    if error_type == "string_too_long":
+        max_length = context.get("max_length")
+        if isinstance(max_length, int):
+            return (
+                f"{field_label} должен быть не длиннее {max_length} "
+                f"{pluralize_ru(max_length, 'символ', 'символа', 'символов')}."
+            )
+        return f"{field_label} слишком длинный."
+
+    if error_type in {"string_type", "bytes_type"}:
+        return f"Поле «{field_label}» должно быть строкой."
+
+    if error_type in {"int_parsing", "int_type"}:
+        return f"Поле «{field_label}» должно быть числом."
+
+    if error_type in {"bool_parsing", "bool_type"}:
+        return f"Поле «{field_label}» должно быть true или false."
+
+    if error_type in {"list_type", "set_type", "tuple_type"}:
+        return f"Поле «{field_label}» должно быть списком."
+
+    return f"Некорректное значение в поле «{field_label}»."
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -91,6 +213,7 @@ async def lifespan(_: FastAPI):
     admin_salt, admin_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
     bootstrap_database(
         admin_username=DEFAULT_ADMIN_USERNAME,
+        admin_password=DEFAULT_ADMIN_PASSWORD,
         admin_password_hash=admin_hash,
         admin_password_salt=admin_salt,
     )
@@ -111,6 +234,18 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-CSRF-Token"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_validation_error(_: Request, exc: RequestValidationError):
+    messages = [translate_validation_error(error) for error in exc.errors()]
+    detail = "; ".join(messages) if messages else "Некорректные данные запроса."
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        content={"detail": detail},
+    )
+
+
 def sanitize_credentials(payload: CredentialsIn) -> Dict:
     username = payload.username.strip()
     password = payload.password.strip()
@@ -291,6 +426,147 @@ def sanitize_admin_payload(payload: AdminQuestionIn) -> Dict:
     }
 
 
+def sanitize_promo_payload(payload: PromoCodeIn) -> Dict:
+    code = payload.code.strip().upper()
+    description = payload.description.strip()
+
+    if len(code) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Код промокода должен быть не короче 3 символов.",
+        )
+
+    if not code.isalnum():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Промокод должен состоять только из букв и цифр.",
+        )
+
+    if len(description) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Описание промокода слишком короткое.",
+        )
+
+    return {
+        "code": code,
+        "description": description,
+        "reward_coins": payload.reward_coins,
+        "unlock_all_levels": payload.unlock_all_levels,
+        "is_active": payload.is_active,
+    }
+
+
+def build_daily_challenge_response(conn: Connection, user_id: int, locale: str = "ru") -> Dict:
+    question_row, challenge_date = get_daily_challenge_row(conn)
+    if question_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ежедневный вопрос пока недоступен.",
+        )
+
+    attempt = get_daily_challenge_attempt(conn, user_id, challenge_date)
+    result = None
+    if attempt is not None:
+        correct_answers = get_correct_answers(conn, question_row["id"], question_row["type"])
+        result = {
+            "is_correct": bool(attempt["is_correct"]),
+            "correct_answers": correct_answers,
+            "explanation": normalize_question_explanation(question_row["explanation"]),
+            "reward_coins": DAILY_CHALLENGE_REWARD_COINS if bool(attempt["is_correct"]) else 0,
+            "answered_at": attempt["answered_at"],
+        }
+
+    return {
+        "challenge_date": challenge_date,
+        "question": translation.translate_question(
+            serialize_public_question(conn, question_row),
+            locale,
+        ),
+        "reward_coins": DAILY_CHALLENGE_REWARD_COINS,
+        "already_answered": attempt is not None,
+        "result": translation.translate_question_feedback(result, locale) if result else None,
+        "leaderboard": list_daily_challenge_leaderboard(conn, challenge_date),
+    }
+
+
+def get_pdf_font_name() -> str:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    for candidate in [
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/local/share/fonts/DejaVuSans.ttf"),
+        Path("/Library/Fonts/Arial Unicode.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+    ]:
+        if not candidate.exists():
+            continue
+
+        font_name = "FroggyUnicode"
+        if font_name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(font_name, str(candidate)))
+        return font_name
+
+    return "Helvetica"
+
+
+def safe_pdf_text(value: str) -> str:
+    try:
+        value.encode("latin-1")
+        return value
+    except UnicodeEncodeError:
+        return value.encode("latin-1", "replace").decode("latin-1")
+
+
+def build_progress_report_pdf(user: dict, progresses: list[dict]) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    _, height = A4
+    font_name = get_pdf_font_name()
+    y = height - 50
+
+    def draw_line(text: str, *, size: int = 11, gap: int = 18):
+        nonlocal y
+        if y < 60:
+            pdf.showPage()
+            pdf.setFont(font_name, size)
+            y = height - 50
+        pdf.setFont(font_name, size)
+        pdf.drawString(40, y, safe_pdf_text(text))
+        y -= gap
+
+    draw_line("Froggy Coder Progress Report", size=18, gap=28)
+    draw_line(f"User: {user['full_username']}")
+    draw_line(f"Wallet coins: {user['coins']}")
+    draw_line(f"Generated at: {utc_now_iso()}")
+    y -= 8
+
+    if not progresses:
+        draw_line("No route progress recorded yet.")
+    else:
+        for item in progresses:
+            route_meta = get_route_meta(item["topic"])
+            route_label = (
+                f"{route_meta['language']} / {route_meta['difficulty']}"
+                if route_meta is not None
+                else item["topic"]
+            )
+            draw_line(f"Route: {route_label}", size=13, gap=20)
+            draw_line(f"Topic: {item['topic']}")
+            draw_line(f"Opened questions: {item['opened_questions']} / {item['total_questions']}")
+            draw_line(f"Best score: {item['best_score']}")
+            draw_line(f"Completed runs: {item['completed_runs']}")
+            draw_line(f"Unlocked level: {item['unlocked_level_index'] + 1}")
+            y -= 8
+
+    pdf.save()
+    return buffer.getvalue()
+
+
 def ensure_topic_access(topic: str, user: dict) -> str:
     normalized_topic = topic.strip().lower()
     if not can_user_access_topic(user["id"], normalized_topic):
@@ -306,12 +582,25 @@ def healthcheck() -> Dict:
     return {"status": "ok", "topic": TOPIC_SLUG}
 
 
+@app.post("/api/i18n/translate", response_model=TranslationBatchOut)
+def translate_batch(payload: TranslationBatchIn):
+    return {
+        "texts": translation.translate_texts(payload.texts, payload.locale),
+    }
+
+
 @app.get("/api/game/routes", response_model=RouteListResponse)
 def game_routes(
+    locale: str = Query(default="ru"),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
-    return {"items": list_route_options(conn, user["id"])}
+    return {
+        "items": translation.translate_route_options(
+            list_route_options(conn, user["id"]),
+            locale,
+        )
+    }
 
 
 @app.post("/api/auth/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
@@ -321,17 +610,12 @@ def register(
     conn: Connection = Depends(get_db),
 ):
     cleaned = sanitize_registration_credentials(payload)
-    tag = generate_unique_user_tag(conn)
-    login_handle = build_full_username(cleaned["username"], tag)
-
     password_salt, password_hash = hash_password(cleaned["password"])
 
     try:
-        user = create_user(
+        user = create_user_with_generated_tag(
             conn,
-            username=login_handle,
             display_name=cleaned["username"],
-            tag=tag,
             password_hash=password_hash,
             password_salt=password_salt,
         )
@@ -386,6 +670,22 @@ def session_state(session: dict = Depends(require_session)):
 @app.get("/api/auth/me", response_model=UserOut)
 def me(user: dict = Depends(require_user)):
     return user
+
+
+@app.get("/api/auth/progress-report")
+def progress_report(
+    user: dict = Depends(require_user),
+    conn: Connection = Depends(get_db),
+):
+    pdf_bytes = build_progress_report_pdf(user, list_user_progress(conn, user["id"]))
+    filename = f"froggy-progress-{user['id']}.pdf"
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
 
 
 @app.put("/api/auth/profile", response_model=UserOut)
@@ -458,12 +758,13 @@ def logout(
 @app.get("/api/game/bootstrap", response_model=BootstrapResponse)
 def game_bootstrap(
     topic: str = Query(default=TOPIC_SLUG),
+    locale: str = Query(default="ru"),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
     topic = ensure_topic_access(topic, user)
     progress_row = ensure_progress_row(conn, user["id"], topic)
-    questions = list_public_questions(conn, topic)
+    questions = translation.translate_questions(list_public_questions(conn, topic), locale)
     progress = serialize_progress(conn, progress_row, topic)
     return {
         "user": user,
@@ -480,15 +781,62 @@ def game_progress_list(
     return {"items": list_user_progress(conn, user["id"])}
 
 
+@app.get("/api/game/daily-challenge", response_model=DailyChallengeResponse)
+def daily_challenge(
+    locale: str = Query(default="ru"),
+    user: dict = Depends(require_user),
+    conn: Connection = Depends(get_db),
+):
+    return build_daily_challenge_response(conn, user["id"], locale)
+
+
+@app.post("/api/game/daily-challenge", response_model=DailyChallengeSubmitResponse)
+def submit_daily_challenge(
+    payload: DailyChallengeSubmitIn,
+    locale: str = Query(default="ru"),
+    session: dict = Depends(require_csrf),
+    user: dict = Depends(require_user),
+    conn: Connection = Depends(get_db),
+):
+    _ = session
+    try:
+        result = submit_daily_challenge_answer(conn, user["id"], payload.answer)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ежедневный вопрос пока недоступен.",
+        ) from exc
+
+    return {
+        "challenge_date": result["challenge_date"],
+        "is_correct": result["is_correct"],
+        "correct_answers": translation.translate_texts(result["correct_answers"], locale),
+        "explanation": translation.translate_text(result["explanation"], locale),
+        "reward_coins": result["reward_coins"],
+        "answered_at": result["answered_at"],
+        "user": result["user"],
+        "leaderboard": result["leaderboard"],
+    }
+
+
 @app.get("/api/shop", response_model=ShopResponse)
 def shop_bootstrap(
+    locale: str = Query(default="ru"),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
 ):
     fresh_user = get_user_shop_state(conn, user["id"])
     return {
         "user": fresh_user,
-        "items": serialize_shop_items(fresh_user["inventory"], fresh_user["active_skin"]),
+        "items": translation.translate_shop_items(
+            serialize_shop_items(fresh_user["inventory"], fresh_user["active_skin"]),
+            locale,
+        ),
         "message": None,
     }
 
@@ -496,6 +844,7 @@ def shop_bootstrap(
 @app.post("/api/shop/items/{item_id}", response_model=ShopResponse)
 def shop_buy_or_equip(
     item_id: str,
+    locale: str = Query(default="ru"),
     session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
@@ -521,14 +870,18 @@ def shop_buy_or_equip(
     )
     return {
         "user": result["user"],
-        "items": serialize_shop_items(result["user"]["inventory"], result["user"]["active_skin"]),
-        "message": message,
+        "items": translation.translate_shop_items(
+            serialize_shop_items(result["user"]["inventory"], result["user"]["active_skin"]),
+            locale,
+        ),
+        "message": translation.translate_message(message, locale),
     }
 
 
 @app.post("/api/auth/redeem-promo", response_model=PromoRedeemResponse)
 def redeem_promo(
     payload: PromoRedeemIn,
+    locale: str = Query(default="ru"),
     session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
@@ -547,6 +900,8 @@ def redeem_promo(
             detail=str(exc),
         ) from exc
 
+    if result.get("message"):
+        result["message"] = translation.translate_message(result["message"], locale)
     return result
 
 
@@ -608,6 +963,7 @@ def reset_current_level(
 @app.post("/api/game/submit-answer", response_model=AnswerResponse)
 def submit_answer(
     payload: SubmitAnswerIn,
+    locale: str = Query(default="ru"),
     session: dict = Depends(require_csrf),
     user: dict = Depends(require_user),
     conn: Connection = Depends(get_db),
@@ -646,8 +1002,8 @@ def submit_answer(
 
     return {
         "is_correct": is_correct,
-        "correct_answers": correct_answers,
-        "explanation": current_question["explanation"],
+        "correct_answers": translation.translate_texts(correct_answers, locale),
+        "explanation": translation.translate_text(current_question["explanation"], locale),
         "next_progress": result["next_progress"],
         "user": serialize_user_row(get_user_by_id(conn, user["id"])),
         "coins_awarded": result["coins_awarded"],
@@ -661,6 +1017,7 @@ def submit_answer(
 def leaderboard(
     topic: str = Query(default=TOPIC_SLUG),
     metric: str = Query(default="best_score"),
+    locale: str = Query(default="ru"),
     limit: int = Query(default=10, ge=1, le=50),
     conn: Connection = Depends(get_db),
 ):
@@ -668,7 +1025,7 @@ def leaderboard(
     return {
         "topic": topic,
         "metric": metric if metric in {"best_score", "completed_runs", "coins"} else "best_score",
-        "metric_label": metric_meta["label"],
+        "metric_label": translation.translate_text(metric_meta["label"], locale),
         "scope": metric_meta["scope"],
         "entries": list_leaderboard(conn, topic, metric, limit),
     }
@@ -677,13 +1034,84 @@ def leaderboard(
 @app.get("/api/admin/questions")
 def admin_list_questions(
     topic: str = Query(default=TOPIC_SLUG),
+    locale: str = Query(default="ru"),
     admin: dict = Depends(require_admin),
     conn: Connection = Depends(get_db),
 ):
     _ = admin
     normalized_topic = topic.strip().lower()
     ensure_known_topic(normalized_topic)
-    return list_admin_questions(conn, normalized_topic)
+    return translation.translate_questions(list_admin_questions(conn, normalized_topic), locale)
+
+
+@app.get("/api/admin/promos", response_model=PromoCodeListResponse)
+def admin_list_promos(
+    locale: str = Query(default="ru"),
+    admin: dict = Depends(require_admin),
+    conn: Connection = Depends(get_db),
+):
+    _ = admin
+    return {"items": translation.translate_promo_codes(list_promo_codes(conn), locale)}
+
+
+@app.post("/api/admin/promos", response_model=PromoCodeOut, status_code=status.HTTP_201_CREATED)
+def admin_create_promo(
+    payload: PromoCodeIn,
+    session: dict = Depends(require_csrf),
+    admin: dict = Depends(require_admin),
+    conn: Connection = Depends(get_db),
+):
+    _ = session
+    _ = admin
+    cleaned = sanitize_promo_payload(payload)
+    existing_row = get_promo_code(conn, cleaned["code"])
+    if existing_row is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Промокод с таким кодом уже существует.",
+        )
+    return upsert_promo_code(conn, cleaned)
+
+
+@app.put("/api/admin/promos/{code}", response_model=PromoCodeOut)
+def admin_update_promo(
+    code: str,
+    payload: PromoCodeIn,
+    session: dict = Depends(require_csrf),
+    admin: dict = Depends(require_admin),
+    conn: Connection = Depends(get_db),
+):
+    _ = session
+    _ = admin
+    normalized_code = code.strip().upper()
+    existing_row = get_promo_code(conn, normalized_code)
+    if existing_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Промокод не найден.",
+        )
+    cleaned = sanitize_promo_payload(payload)
+    cleaned["code"] = normalized_code
+    return upsert_promo_code(conn, cleaned)
+
+
+@app.delete("/api/admin/promos/{code}", status_code=status.HTTP_204_NO_CONTENT)
+def admin_delete_promo(
+    code: str,
+    session: dict = Depends(require_csrf),
+    admin: dict = Depends(require_admin),
+    conn: Connection = Depends(get_db),
+):
+    _ = session
+    _ = admin
+    existing_row = get_promo_code(conn, code)
+    if existing_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Промокод не найден.",
+        )
+    delete_promo_code_record(conn, code)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/admin/questions", status_code=status.HTTP_201_CREATED)

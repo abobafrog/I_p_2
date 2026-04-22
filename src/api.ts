@@ -6,20 +6,28 @@ import type {
   AuthResponse,
   BootstrapResponse,
   Credentials,
+  DailyChallengeResponse,
+  DailyChallengeSubmitPayload,
+  DailyChallengeSubmitResponse,
   LeaderboardMetric,
   LeaderboardResponse,
   Progress,
   ProgressListResponse,
+  PromoCode,
+  PromoCodeListResponse,
+  PromoCodePayload,
   PromoRedeemPayload,
   PromoRedeemResponse,
   RouteListResponse,
   SelectLevelPayload,
   SessionResponse,
   ShopResponse,
+  TranslationBatchResponse,
   SubmitAnswerPayload,
   TopicPayload,
   User,
 } from "./types";
+import type { AppLocale } from "./i18n";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -96,6 +104,10 @@ function buildHeaders(init?: RequestInit) {
   return headers;
 }
 
+function buildLocaleQuery(locale: AppLocale) {
+  return `locale=${encodeURIComponent(locale)}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -124,6 +136,31 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    credentials: "include",
+    headers: buildHeaders(init),
+  });
+
+  if (!response.ok) {
+    let message = "Произошла ошибка запроса";
+    try {
+      const errorBody = (await response.json()) as { detail?: unknown };
+      const formattedDetail = formatApiDetail(errorBody.detail);
+      if (formattedDetail) {
+        message = formattedDetail;
+      }
+    } catch {
+      message = response.statusText || message;
+    }
+
+    throw new ApiError(message, response.status);
+  }
+
+  return response.blob();
 }
 
 export function applySession(session: SessionResponse | AuthResponse) {
@@ -167,16 +204,43 @@ export function logout() {
   return request<void>("/auth/logout", { method: "POST" });
 }
 
-export function getRoutes() {
-  return request<RouteListResponse>("/game/routes");
+export function translateTexts(texts: string[], locale: AppLocale = "ru") {
+  return request<TranslationBatchResponse>("/i18n/translate", {
+    method: "POST",
+    body: JSON.stringify({ texts, locale }),
+  });
+}
+
+export function getRoutes(locale: AppLocale = "ru") {
+  return request<RouteListResponse>(`/game/routes?${buildLocaleQuery(locale)}`);
 }
 
 export function getAllProgress() {
   return request<ProgressListResponse>("/game/progress");
 }
 
-export function getBootstrap(topic: string) {
-  return request<BootstrapResponse>(`/game/bootstrap?topic=${encodeURIComponent(topic)}`);
+export function downloadProgressReport() {
+  return requestBlob("/auth/progress-report");
+}
+
+export function getBootstrap(topic: string, locale: AppLocale = "ru") {
+  return request<BootstrapResponse>(
+    `/game/bootstrap?topic=${encodeURIComponent(topic)}&${buildLocaleQuery(locale)}`,
+  );
+}
+
+export function getDailyChallenge(locale: AppLocale = "ru") {
+  return request<DailyChallengeResponse>(`/game/daily-challenge?${buildLocaleQuery(locale)}`);
+}
+
+export function submitDailyChallenge(
+  payload: DailyChallengeSubmitPayload,
+  locale: AppLocale = "ru",
+) {
+  return request<DailyChallengeSubmitResponse>(`/game/daily-challenge?${buildLocaleQuery(locale)}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function resetProgress(topic: string) {
@@ -203,38 +267,68 @@ export function resetLevel(payload: TopicPayload) {
   });
 }
 
-export function submitAnswer(payload: SubmitAnswerPayload) {
-  return request<AnswerResult>("/game/submit-answer", {
+export function submitAnswer(payload: SubmitAnswerPayload, locale: AppLocale = "ru") {
+  return request<AnswerResult>(`/game/submit-answer?${buildLocaleQuery(locale)}`, {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function getLeaderboard(topic: string, metric: LeaderboardMetric = "best_score") {
+export function getLeaderboard(
+  topic: string,
+  metric: LeaderboardMetric = "best_score",
+  locale: AppLocale = "ru",
+) {
   return request<LeaderboardResponse>(
-    `/leaderboard?topic=${encodeURIComponent(topic)}&metric=${encodeURIComponent(metric)}`,
+    `/leaderboard?topic=${encodeURIComponent(topic)}&metric=${encodeURIComponent(metric)}&${buildLocaleQuery(locale)}`,
   );
 }
 
-export function getShop() {
-  return request<ShopResponse>("/shop");
+export function getShop(locale: AppLocale = "ru") {
+  return request<ShopResponse>(`/shop?${buildLocaleQuery(locale)}`);
 }
 
-export function buyOrEquipShopItem(itemId: string) {
-  return request<ShopResponse>(`/shop/items/${encodeURIComponent(itemId)}`, {
+export function buyOrEquipShopItem(itemId: string, locale: AppLocale = "ru") {
+  return request<ShopResponse>(`/shop/items/${encodeURIComponent(itemId)}?${buildLocaleQuery(locale)}`, {
     method: "POST",
   });
 }
 
-export function redeemPromoCode(payload: PromoRedeemPayload) {
-  return request<PromoRedeemResponse>("/auth/redeem-promo", {
+export function redeemPromoCode(payload: PromoRedeemPayload, locale: AppLocale = "ru") {
+  return request<PromoRedeemResponse>(`/auth/redeem-promo?${buildLocaleQuery(locale)}`, {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function getAdminQuestions(topic: string) {
-  return request<AdminQuestion[]>(`/admin/questions?topic=${encodeURIComponent(topic)}`);
+export function getAdminQuestions(topic: string, locale: AppLocale = "ru") {
+  return request<AdminQuestion[]>(
+    `/admin/questions?topic=${encodeURIComponent(topic)}&${buildLocaleQuery(locale)}`,
+  );
+}
+
+export function getAdminPromos(locale: AppLocale = "ru") {
+  return request<PromoCodeListResponse>(`/admin/promos?${buildLocaleQuery(locale)}`);
+}
+
+export function createPromoCode(payload: PromoCodePayload) {
+  return request<PromoCode>("/admin/promos", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updatePromoCode(code: string, payload: PromoCodePayload) {
+  return request<PromoCode>(`/admin/promos/${encodeURIComponent(code)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deletePromoCode(code: string) {
+  return request<void>(`/admin/promos/${encodeURIComponent(code)}`, {
+    method: "DELETE",
+  });
 }
 
 export function createAdminQuestion(payload: AdminQuestionPayload) {

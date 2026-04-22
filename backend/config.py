@@ -81,3 +81,19 @@ def get_cookie_samesite() -> str:
     if value in {"lax", "strict", "none"}:
         return value
     return "lax"
+
+
+def get_translation_api_base_url() -> str:
+    return os.getenv("FROGGY_TRANSLATION_API_BASE_URL", "").strip()
+
+
+def get_translation_api_key() -> str:
+    return os.getenv("FROGGY_TRANSLATION_API_KEY", "").strip()
+
+
+def get_translation_timeout_seconds() -> float:
+    raw_value = os.getenv("FROGGY_TRANSLATION_TIMEOUT_SECONDS", "10").strip()
+    try:
+        return max(1.0, float(raw_value))
+    except ValueError:
+        return 10.0

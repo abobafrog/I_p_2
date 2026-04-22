@@ -95,6 +95,31 @@ export type PromoRedeemResponse = {
   message: string;
 };
 
+export type PromoCode = {
+  code: string;
+  description: string;
+  reward_coins: number;
+  unlock_all_levels: boolean;
+  is_active: boolean;
+  redemptions_count: number;
+};
+
+export type PromoCodePayload = {
+  code: string;
+  description: string;
+  reward_coins: number;
+  unlock_all_levels: boolean;
+  is_active: boolean;
+};
+
+export type PromoCodeListResponse = {
+  items: PromoCode[];
+};
+
+export type TranslationBatchResponse = {
+  texts: string[];
+};
+
 export type SubmitAnswerPayload = {
   topic: string;
   question_id: number;
@@ -108,6 +133,42 @@ export type SelectLevelPayload = {
 
 export type TopicPayload = {
   topic: string;
+};
+
+export type DailyChallengeEntry = {
+  rank: number;
+  username: string;
+  tag: string | null;
+  full_username: string;
+  is_correct: boolean;
+  answered_at: string | null;
+};
+
+export type DailyChallengeResult = {
+  is_correct: boolean;
+  correct_answers: string[];
+  explanation: string;
+  reward_coins: number;
+  answered_at: string;
+};
+
+export type DailyChallengeResponse = {
+  challenge_date: string;
+  question: Question;
+  reward_coins: number;
+  already_answered: boolean;
+  result: DailyChallengeResult | null;
+  leaderboard: DailyChallengeEntry[];
+};
+
+export type DailyChallengeSubmitPayload = {
+  answer: string;
+};
+
+export type DailyChallengeSubmitResponse = DailyChallengeResult & {
+  challenge_date: string;
+  user: User;
+  leaderboard: DailyChallengeEntry[];
 };
 
 export type AnswerResult = {

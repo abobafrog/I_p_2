@@ -50,7 +50,33 @@ TAG_LENGTH = 4
 ALL_USER_TAGS = ["".join(chars) for chars in permutations(TAG_DIGITS, TAG_LENGTH)]
 PROMO_FROGBEST = "FROGBEST"
 PROMO_UNLOCK_REWARD_COINS = 1000
+PROMO_SWAMP200 = "SWAMP200"
+PROMO_LOTUS500 = "LOTUS500"
+DAILY_CHALLENGE_REWARD_COINS = 25
 HEARTS_PER_LEVEL = 3
+DEFAULT_PROMO_CODES = [
+    {
+        "code": PROMO_FROGBEST,
+        "description": "Открывает все уровни и добавляет 1000 монет.",
+        "reward_coins": PROMO_UNLOCK_REWARD_COINS,
+        "unlock_all_levels": 1,
+        "is_active": 1,
+    },
+    {
+        "code": PROMO_SWAMP200,
+        "description": "Небольшой бонус для кошелька: +200 монет.",
+        "reward_coins": 200,
+        "unlock_all_levels": 0,
+        "is_active": 1,
+    },
+    {
+        "code": PROMO_LOTUS500,
+        "description": "Редкий бонус: +500 монет без разблокировки уровней.",
+        "reward_coins": 500,
+        "unlock_all_levels": 0,
+        "is_active": 1,
+    },
+]
 SMART_QUOTES_TRANSLATION = str.maketrans(
     {
         "‘": "'",
@@ -67,12 +93,17 @@ SMART_QUOTES_TRANSLATION = str.maketrans(
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
 def get_connection() -> Connection:
     db_path = get_database_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
@@ -174,6 +205,37 @@ def init_db() -> None:
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                reward_coins INTEGER NOT NULL DEFAULT 0,
+                unlock_all_levels INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS promo_redemptions (
+                user_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                redeemed_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, code),
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+                FOREIGN KEY (code) REFERENCES promo_codes (code) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_challenge_attempts (
+                challenge_date TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                question_id INTEGER NOT NULL,
+                submitted_answer TEXT NOT NULL,
+                is_correct INTEGER NOT NULL,
+                answered_at TEXT NOT NULL,
+                PRIMARY KEY (challenge_date, user_id),
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+                FOREIGN KEY (question_id) REFERENCES questions (id) ON DELETE CASCADE
+            );
+
             """
         )
         ensure_user_columns(conn)
@@ -182,6 +244,7 @@ def init_db() -> None:
         ensure_progress_columns(conn)
         ensure_user_identity_columns(conn)
         ensure_user_indexes(conn)
+        ensure_promo_indexes(conn)
         conn.commit()
     finally:
         conn.close()
@@ -249,6 +312,21 @@ def ensure_user_indexes(conn: Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tag_unique
         ON users(tag)
         WHERE tag IS NOT NULL AND tag <> ''
+        """
+    )
+
+
+def ensure_promo_indexes(conn: Connection) -> None:
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_promo_redemptions_code
+        ON promo_redemptions(code)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_daily_challenge_attempts_date
+        ON daily_challenge_attempts(challenge_date, answered_at)
         """
     )
 
@@ -370,6 +448,7 @@ def ensure_user_identity_columns(conn: Connection) -> None:
 
 def bootstrap_database(
     admin_username: str,
+    admin_password: str,
     admin_password_hash: str,
     admin_password_salt: str,
 ) -> None:
@@ -378,11 +457,14 @@ def bootstrap_database(
         ensure_default_admin(
             conn,
             username=admin_username,
+            password=admin_password,
             password_hash=admin_password_hash,
             password_salt=admin_password_salt,
         )
         cleanup_seed_route_duplicates(conn)
         ensure_seed_questions(conn)
+        seed_default_promo_codes(conn)
+        migrate_legacy_promo_redemptions(conn)
         conn.commit()
     finally:
         conn.close()
@@ -391,13 +473,25 @@ def bootstrap_database(
 def ensure_default_admin(
     conn: Connection,
     username: str,
+    password: str,
     password_hash: str,
     password_salt: str,
 ) -> None:
     row = conn.execute(
-        "SELECT id FROM users WHERE is_admin = 1 LIMIT 1"
+        "SELECT id, password_hash, password_salt FROM users WHERE is_admin = 1 LIMIT 1"
     ).fetchone()
     if row is not None:
+        from backend.auth import verify_password
+
+        if not verify_password(password, row["password_salt"], row["password_hash"]):
+            conn.execute(
+                """
+                UPDATE users
+                SET password_hash = ?, password_salt = ?
+                WHERE id = ?
+                """,
+                (password_hash, password_salt, row["id"]),
+            )
         return
 
     conn.execute(
@@ -415,6 +509,68 @@ def ensure_default_admin(
         """,
         (username, username, password_hash, password_salt, utc_now_iso()),
     )
+
+
+def seed_default_promo_codes(conn: Connection) -> None:
+    for promo in DEFAULT_PROMO_CODES:
+        row = conn.execute(
+            "SELECT code FROM promo_codes WHERE code = ?",
+            (promo["code"],),
+        ).fetchone()
+        if row is not None:
+            continue
+
+        now = utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO promo_codes (
+                code,
+                description,
+                reward_coins,
+                unlock_all_levels,
+                is_active,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                promo["code"],
+                promo["description"],
+                promo["reward_coins"],
+                promo["unlock_all_levels"],
+                promo["is_active"],
+                now,
+                now,
+            ),
+        )
+
+
+def migrate_legacy_promo_redemptions(conn: Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, redeemed_promos_json
+        FROM users
+        WHERE redeemed_promos_json IS NOT NULL AND redeemed_promos_json <> ''
+        """
+    ).fetchall()
+
+    for row in rows:
+        for code in parse_redeemed_promos(row["redeemed_promos_json"]):
+            promo_row = conn.execute(
+                "SELECT code FROM promo_codes WHERE code = ?",
+                (code,),
+            ).fetchone()
+            if promo_row is None:
+                continue
+
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO promo_redemptions (user_id, code, redeemed_at)
+                VALUES (?, ?, ?)
+                """,
+                (row["id"], code, utc_now_iso()),
+            )
 
 
 def cleanup_seed_route_duplicates(conn: Connection) -> None:
@@ -687,6 +843,48 @@ def create_user(
     return get_user_by_id(conn, cursor.lastrowid)
 
 
+def create_user_with_generated_tag(
+    conn: Connection,
+    display_name: str,
+    password_hash: str,
+    password_salt: str,
+    max_attempts: int = 5,
+):
+    for _ in range(max_attempts):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            tag = generate_unique_user_tag(conn)
+            login_handle = build_full_username(display_name, tag)
+            cursor = conn.execute(
+                """
+                INSERT INTO users (
+                    username,
+                    display_name,
+                    tag,
+                    password_hash,
+                    password_salt,
+                    is_admin,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    login_handle,
+                    display_name,
+                    tag,
+                    password_hash,
+                    password_salt,
+                    utc_now_iso(),
+                ),
+            )
+            conn.commit()
+            return get_user_by_id(conn, cursor.lastrowid)
+        except sqlite3.IntegrityError:
+            conn.rollback()
+
+    raise sqlite3.IntegrityError("Could not allocate a unique user tag after retries.")
+
+
 def update_user_profile(
     conn: Connection,
     user_id: int,
@@ -723,34 +921,67 @@ def list_user_progress(conn: Connection, user_id: int) -> List[Dict]:
     return progress_items
 
 
-def redeem_promo_code(conn: Connection, user_id: int, code: str) -> Dict:
-    normalized_code = (code or "").strip().upper()
-    if normalized_code != PROMO_FROGBEST:
-        raise ValueError("Промокод не найден.")
+def serialize_promo_row(conn: Connection, row) -> Dict:
+    redemptions_row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM promo_redemptions
+        WHERE code = ?
+        """,
+        (row["code"],),
+    ).fetchone()
 
+    return {
+        "code": row["code"],
+        "description": row["description"],
+        "reward_coins": row["reward_coins"],
+        "unlock_all_levels": bool(row["unlock_all_levels"]),
+        "is_active": bool(row["is_active"]),
+        "redemptions_count": int(redemptions_row["count"]),
+    }
+
+
+def list_promo_codes(conn: Connection) -> List[Dict]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM promo_codes
+        ORDER BY is_active DESC, code ASC
+        """
+    ).fetchall()
+    return [serialize_promo_row(conn, row) for row in rows]
+
+
+def get_promo_code(conn: Connection, code: str):
+    return conn.execute(
+        """
+        SELECT *
+        FROM promo_codes
+        WHERE upper(code) = upper(?)
+        """,
+        (code,),
+    ).fetchone()
+
+
+def sync_legacy_redeemed_promos_json(conn: Connection, user_id: int, code: str) -> None:
     user_row = get_user_by_id(conn, user_id)
     if user_row is None:
         raise ValueError("User not found")
 
     redeemed_promos = parse_redeemed_promos(user_row["redeemed_promos_json"])
-    if normalized_code in redeemed_promos:
-        raise PermissionError("Этот промокод уже активирован.")
+    if code not in redeemed_promos:
+        redeemed_promos.append(code)
+        conn.execute(
+            """
+            UPDATE users
+            SET redeemed_promos_json = ?
+            WHERE id = ?
+            """,
+            (json.dumps(redeemed_promos, ensure_ascii=False), user_id),
+        )
 
-    redeemed_promos.append(normalized_code)
-    conn.execute(
-        """
-        UPDATE users
-        SET coins = coins + ?,
-            redeemed_promos_json = ?
-        WHERE id = ?
-        """,
-        (
-            PROMO_UNLOCK_REWARD_COINS,
-            json.dumps(redeemed_promos, ensure_ascii=False),
-            user_id,
-        ),
-    )
 
+def unlock_all_route_levels(conn: Connection, user_id: int) -> None:
     for route in list_route_options(conn, user_id):
         topic = route["topic"]
         row = ensure_progress_row(conn, user_id, topic)
@@ -768,12 +999,256 @@ def redeem_promo_code(conn: Connection, user_id: int, code: str) -> Dict:
             (total_questions, total_questions, utc_now_iso(), row["id"]),
         )
 
+
+def upsert_promo_code(conn: Connection, payload: Dict) -> Dict:
+    normalized_code = payload["code"].strip().upper()
+    now = utc_now_iso()
+    existing_row = get_promo_code(conn, normalized_code)
+
+    if existing_row is None:
+        conn.execute(
+            """
+            INSERT INTO promo_codes (
+                code,
+                description,
+                reward_coins,
+                unlock_all_levels,
+                is_active,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_code,
+                payload["description"],
+                payload["reward_coins"],
+                1 if payload["unlock_all_levels"] else 0,
+                1 if payload["is_active"] else 0,
+                now,
+                now,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE promo_codes
+            SET description = ?,
+                reward_coins = ?,
+                unlock_all_levels = ?,
+                is_active = ?,
+                updated_at = ?
+            WHERE code = ?
+            """,
+            (
+                payload["description"],
+                payload["reward_coins"],
+                1 if payload["unlock_all_levels"] else 0,
+                1 if payload["is_active"] else 0,
+                now,
+                normalized_code,
+            ),
+        )
+
+    conn.commit()
+    row = get_promo_code(conn, normalized_code)
+    return serialize_promo_row(conn, row)
+
+
+def delete_promo_code_record(conn: Connection, code: str) -> None:
+    conn.execute(
+        "DELETE FROM promo_codes WHERE upper(code) = upper(?)",
+        (code,),
+    )
+    conn.commit()
+
+
+def redeem_promo_code(conn: Connection, user_id: int, code: str) -> Dict:
+    normalized_code = (code or "").strip().upper()
+    promo_row = get_promo_code(conn, normalized_code)
+    if promo_row is None or not bool(promo_row["is_active"]):
+        raise ValueError("Промокод не найден.")
+
+    user_row = get_user_by_id(conn, user_id)
+    if user_row is None:
+        raise ValueError("User not found")
+
+    redemption_row = conn.execute(
+        """
+        SELECT 1
+        FROM promo_redemptions
+        WHERE user_id = ? AND code = ?
+        """,
+        (user_id, normalized_code),
+    ).fetchone()
+    if redemption_row is not None:
+        raise PermissionError("Этот промокод уже активирован.")
+
+    conn.execute(
+        """
+        INSERT INTO promo_redemptions (user_id, code, redeemed_at)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, normalized_code, utc_now_iso()),
+    )
+    sync_legacy_redeemed_promos_json(conn, user_id, normalized_code)
+
+    if promo_row["reward_coins"] > 0:
+        conn.execute(
+            """
+            UPDATE users
+            SET coins = coins + ?
+            WHERE id = ?
+            """,
+            (promo_row["reward_coins"], user_id),
+        )
+
+    if bool(promo_row["unlock_all_levels"]):
+        unlock_all_route_levels(conn, user_id)
+
     conn.commit()
     updated_user = get_user_by_id(conn, user_id)
+    message_parts = []
+    if promo_row["reward_coins"] > 0:
+        message_parts.append(f"+{promo_row['reward_coins']} монет")
+    if bool(promo_row["unlock_all_levels"]):
+        message_parts.append("все уровни открыты")
+    message_suffix = ", ".join(message_parts) if message_parts else "бонус применен"
     return {
         "user": serialize_user_row(updated_user),
         "progresses": list_user_progress(conn, user_id),
-        "message": "Промокод FROGBEST активирован: +1000 монет и все уровни открыты.",
+        "message": f"Промокод {normalized_code} активирован: {message_suffix}.",
+    }
+
+
+def get_daily_challenge_date() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def get_daily_challenge_row(conn: Connection, challenge_date: Optional[str] = None):
+    target_date = challenge_date or get_daily_challenge_date()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM questions
+        ORDER BY topic ASC, order_index ASC, id ASC
+        """
+    ).fetchall()
+    if not rows:
+        return None, target_date
+
+    seed_value = sum(target_date.encode("utf-8"))
+    index = seed_value % len(rows)
+    return rows[index], target_date
+
+
+def get_daily_challenge_attempt(conn: Connection, user_id: int, challenge_date: str):
+    return conn.execute(
+        """
+        SELECT *
+        FROM daily_challenge_attempts
+        WHERE user_id = ? AND challenge_date = ?
+        """,
+        (user_id, challenge_date),
+    ).fetchone()
+
+
+def list_daily_challenge_leaderboard(conn: Connection, challenge_date: Optional[str] = None) -> List[Dict]:
+    target_date = challenge_date or get_daily_challenge_date()
+    rows = conn.execute(
+        """
+        SELECT
+            users.username,
+            users.display_name,
+            users.tag,
+            attempts.is_correct,
+            attempts.answered_at
+        FROM daily_challenge_attempts AS attempts
+        JOIN users ON users.id = attempts.user_id
+        WHERE attempts.challenge_date = ?
+          AND attempts.is_correct = 1
+          AND users.is_admin = 0
+        ORDER BY attempts.answered_at ASC, users.username ASC
+        LIMIT 25
+        """,
+        (target_date,),
+    ).fetchall()
+
+    items = []
+    for index, row in enumerate(rows, start=1):
+        display_name = (row["display_name"] or "").strip() or row["username"]
+        items.append(
+            {
+                "rank": index,
+                "username": display_name,
+                "tag": normalize_user_tag(row["tag"]),
+                "full_username": build_full_username(display_name, normalize_user_tag(row["tag"])),
+                "is_correct": bool(row["is_correct"]),
+                "answered_at": row["answered_at"],
+            }
+        )
+
+    return items
+
+
+def submit_daily_challenge_answer(conn: Connection, user_id: int, answer: str) -> Dict:
+    question_row, challenge_date = get_daily_challenge_row(conn)
+    if question_row is None:
+        raise ValueError("Daily challenge question not found")
+
+    existing_attempt = get_daily_challenge_attempt(conn, user_id, challenge_date)
+    if existing_attempt is not None:
+        raise PermissionError("Ежедневный вопрос уже отвечен.")
+
+    correct_answers = get_correct_answers(conn, question_row["id"], question_row["type"])
+    is_correct = evaluate_answer(answer, correct_answers)
+    answered_at = utc_now_iso()
+
+    conn.execute(
+        """
+        INSERT INTO daily_challenge_attempts (
+            challenge_date,
+            user_id,
+            question_id,
+            submitted_answer,
+            is_correct,
+            answered_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            challenge_date,
+            user_id,
+            question_row["id"],
+            answer,
+            1 if is_correct else 0,
+            answered_at,
+        ),
+    )
+
+    reward_coins = DAILY_CHALLENGE_REWARD_COINS if is_correct else 0
+    if reward_coins > 0:
+        conn.execute(
+            """
+            UPDATE users
+            SET coins = coins + ?
+            WHERE id = ?
+            """,
+            (reward_coins, user_id),
+        )
+
+    conn.commit()
+    updated_user = get_user_by_id(conn, user_id)
+    return {
+        "challenge_date": challenge_date,
+        "question": serialize_public_question(conn, question_row),
+        "is_correct": is_correct,
+        "correct_answers": correct_answers,
+        "explanation": normalize_question_explanation(question_row["explanation"]),
+        "reward_coins": reward_coins,
+        "answered_at": answered_at,
+        "user": serialize_user_row(updated_user),
+        "leaderboard": list_daily_challenge_leaderboard(conn, challenge_date),
     }
 
 
@@ -921,6 +1396,14 @@ def derive_hint_text(row) -> str:
         return seed_question["hint"]
 
     explanation = row["explanation"] or ""
+    prefix = "Подсказка из desktop-версии: "
+    if explanation.startswith(prefix):
+        return explanation[len(prefix):]
+    return explanation
+
+
+def normalize_question_explanation(value: Optional[str]) -> str:
+    explanation = (value or "").strip()
     prefix = "Подсказка из desktop-версии: "
     if explanation.startswith(prefix):
         return explanation[len(prefix):]
@@ -1315,6 +1798,7 @@ def apply_answer_result(
     route_shape = get_route_shape(conn, topic, total_questions)
     coins_awarded = 10 if is_correct else 0
 
+    # All writes in this function stay within the same transaction and are committed once.
     insert_attempt(conn, user_id, question_id, submitted_answer, is_correct)
 
     if not is_correct:
@@ -1347,7 +1831,8 @@ def apply_answer_result(
         if route_shape["tasks_per_level"] > 0
         else 0
     )
-    award_coins(conn, user_id, coins_awarded)
+    if coins_awarded > 0:
+        award_coins(conn, user_id, coins_awarded)
 
     if next_index >= total_questions:
         best_score = max(progress_row["best_score"], next_score)
@@ -1449,30 +1934,43 @@ def list_leaderboard(
                 users.display_name,
                 users.tag,
                 users.coins,
-                COALESCE(progress_stats.completed_runs, 0) AS completed_runs,
-                COALESCE(progress_stats.best_score, 0) AS best_score,
+                progress.best_score,
+                progress.completed_runs,
+                COALESCE(attempt_stats.topic_coins, 0) AS topic_coins,
                 result_stats.last_played_at AS last_played_at
-            FROM users
+            FROM progress
+            JOIN users ON users.id = progress.user_id
+            LEFT JOIN (
+                SELECT
+                    question_attempts.user_id AS user_id,
+                    questions.topic AS topic,
+                    SUM(CASE WHEN question_attempts.is_correct = 1 THEN 10 ELSE 0 END) AS topic_coins
+                FROM question_attempts
+                JOIN questions ON questions.id = question_attempts.question_id
+                GROUP BY question_attempts.user_id, questions.topic
+            ) AS attempt_stats
+                ON attempt_stats.user_id = progress.user_id
+               AND attempt_stats.topic = progress.topic
             LEFT JOIN (
                 SELECT
                     user_id,
-                    SUM(completed_runs) AS completed_runs,
-                    MAX(best_score) AS best_score
-                FROM progress
-                GROUP BY user_id
-            ) AS progress_stats ON progress_stats.user_id = users.id
-            LEFT JOIN (
-                SELECT
-                    user_id,
+                    topic,
                     MAX(created_at) AS last_played_at
                 FROM quiz_results
-                GROUP BY user_id
-            ) AS result_stats ON result_stats.user_id = users.id
-            WHERE users.is_admin = 0 AND users.coins > 0
-            ORDER BY users.coins DESC, completed_runs DESC, last_played_at DESC, users.username ASC
+                GROUP BY user_id, topic
+            ) AS result_stats
+                ON result_stats.user_id = progress.user_id
+               AND result_stats.topic = progress.topic
+            WHERE progress.topic = ? AND users.is_admin = 0
+              AND (
+                    COALESCE(attempt_stats.topic_coins, 0) > 0
+                 OR progress.best_score > 0
+                 OR progress.completed_runs > 0
+              )
+            ORDER BY topic_coins DESC, progress.completed_runs DESC, last_played_at DESC, users.username ASC
             LIMIT ?
             """,
-            (limit,),
+            (topic, limit),
         ).fetchall()
     else:
         order_by = (
@@ -1514,7 +2012,7 @@ def list_leaderboard(
     entries = []
     for index, row in enumerate(rows, start=1):
         metric_value = (
-            row["coins"]
+            row["topic_coins"]
             if metric_key == "coins"
             else row["completed_runs"]
             if metric_key == "completed_runs"

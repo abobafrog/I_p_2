@@ -11,6 +11,10 @@
 - таблица лидеров;
 - магазин и внутриигровая валюта;
 - admin CRUD для вопросов;
+- admin CRUD для промокодов;
+- ежедневный вопрос с отдельным рейтингом дня;
+- экспорт прогресса в PDF;
+- опциональный таймер на вопрос на frontend;
 - cookie-based авторизация с CSRF-защитой.
 
 ## Безопасность и конфиг
@@ -19,7 +23,7 @@
 
 1. Скопируйте `.env.example` в `.env`.
 2. Укажите сильный `FROGGY_ADMIN_PASSWORD`.
-3. При необходимости настройте `FROGGY_ALLOWED_ORIGINS` и `FROGGY_COOKIE_SECURE`.
+3. При необходимости настройте `FROGGY_ALLOWED_ORIGINS`, `FROGGY_COOKIE_SECURE` и параметры перевода.
 
 Пример:
 
@@ -29,15 +33,34 @@ FROGGY_ADMIN_PASSWORD=replace-with-a-strong-secret
 FROGGY_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
 FROGGY_COOKIE_SECURE=false
 FROGGY_COOKIE_SAMESITE=lax
+FROGGY_TRANSLATION_API_BASE_URL=http://translator:5000
+FROGGY_TRANSLATION_TIMEOUT_SECONDS=10
 VITE_API_BASE_URL=/api
 ```
 
 Важно:
 
 - backend больше не использует дефолтный пароль `admin12345`;
+- при старте пароль админа синхронизируется из `.env`, даже если пользователь `frog_admin` уже есть в базе;
 - авторизация работает через `HttpOnly` cookie, а не через `Bearer` в `localStorage`;
 - все `POST`/`PUT`/`DELETE` защищены CSRF-токеном;
 - CORS задаётся через `FROGGY_ALLOWED_ORIGINS`.
+- перевод вопросов, магазина и части интерфейсных текстов идет через LibreTranslate-compatible API; в Docker по умолчанию поднимается локальный `translator`-контейнер;
+- при необходимости можно указать свой `FROGGY_TRANSLATION_API_BASE_URL` и `FROGGY_TRANSLATION_API_KEY`.
+
+Если перевод не работает, почти всегда причина одна из двух:
+
+- backend не получил `FROGGY_TRANSLATION_API_BASE_URL`;
+- указан endpoint, до которого контейнер не может достучаться.
+
+Для Docker проще всего:
+
+1. Скопируй `.env.example` в `.env`.
+2. Оставь `FROGGY_TRANSLATION_API_BASE_URL=http://translator:5000`, чтобы backend ходил в локальный контейнер.
+3. Если используешь свой сервис, проверь, что URL доступен именно из контейнера `backend`.
+
+Первый запуск может быть долгим, потому что `translator` скачивает модели.
+Если хочешь свой отдельный LibreTranslate вне этого compose, пропиши в `.env` его реальный адрес.
 
 ## Структура проекта
 
@@ -116,6 +139,8 @@ npm run dev
 - `POST /api/auth/login` делает то же самое для существующего пользователя;
 - `GET /api/auth/session` восстанавливает состояние текущей сессии;
 - `GET /api/auth/me` возвращает текущего пользователя;
+- `GET /api/auth/progress-report` формирует PDF-отчёт по текущему прогрессу;
+- `POST /api/auth/redeem-promo` активирует промокод для аккаунта;
 - `POST /api/auth/logout` удаляет серверную сессию и очищает cookie.
 
 Frontend отправляет запросы с `credentials: "include"` и больше не хранит токен в `localStorage`.
@@ -128,7 +153,9 @@ Frontend отправляет запросы с `credentials: "include"` и бо
 - `POST /api/auth/login`
 - `GET /api/auth/session`
 - `GET /api/auth/me`
+- `GET /api/auth/progress-report`
 - `PUT /api/auth/profile`
+- `POST /api/auth/redeem-promo`
 - `POST /api/auth/logout`
 
 ### Game
@@ -136,6 +163,8 @@ Frontend отправляет запросы с `credentials: "include"` и бо
 - `GET /api/game/routes`
 - `GET /api/game/bootstrap`
 - `GET /api/game/progress`
+- `GET /api/game/daily-challenge`
+- `POST /api/game/daily-challenge`
 - `POST /api/game/reset`
 - `POST /api/game/reset-all`
 - `POST /api/game/select-level`
@@ -157,8 +186,20 @@ Frontend отправляет запросы с `credentials: "include"` и бо
 - `POST /api/admin/questions`
 - `PUT /api/admin/questions/{id}`
 - `DELETE /api/admin/questions/{id}`
+- `GET /api/admin/promos`
+- `POST /api/admin/promos`
+- `PUT /api/admin/promos/{code}`
+- `DELETE /api/admin/promos/{code}`
 
 Для admin CRUD backend теперь валидирует `topic` и возвращает `400`, если маршрута не существует.
+
+## Что добавлено поверх базовой игры
+
+- лидерборд по `coins` теперь route-scoped: для каждого `topic` считается свой рейтинг, а не общий кошелек по всем маршрутам;
+- генерация пользовательского тега защищена от коллизий через транзакцию и retry при `IntegrityError`;
+- админка умеет создавать, редактировать, отключать и удалять промокоды;
+- в профиле появился экспорт прогресса в PDF, а в приложении отдельный экран для ежедневного вопроса;
+- таймер на вопрос сделан как опциональный frontend-режим: по истечении времени попытка уходит как неверная.
 
 ## Тесты и smoke-checks
 
@@ -178,7 +219,11 @@ npm run build
 
 - регистрацию и восстановление cookie-сессии;
 - CSRF-защиту mutating-endpoints;
-- admin CRUD и запрет несуществующих `topic`.
+- admin CRUD и запрет несуществующих `topic`;
+- retry при коллизии пользовательского тега;
+- route-scoped leaderboards по `coins`;
+- admin promo CRUD и активацию промокодов;
+- daily challenge и выдачу PDF-отчёта.
 
 ## Deploy
 

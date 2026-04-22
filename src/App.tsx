@@ -1,18 +1,35 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, FormEvent } from "react";
 import bolotoBackdrop from "../boloto.png";
 import swampBackdrop from "../swamp_bg.png";
 import winBackdrop from "../win.jpg";
+import {
+  createAppCopy,
+  formatAppDate,
+  formatAppTime,
+  getHtmlLang,
+  getStoredLocale,
+  getStoredTheme,
+  LOCALE_STORAGE_KEY,
+  THEME_STORAGE_KEY,
+  type AppLocale,
+  type ThemeMode,
+} from "./i18n";
 import {
   ApiError,
   applySession,
   buyOrEquipShopItem,
   clearSessionContext,
   createAdminQuestion,
+  createPromoCode,
   deleteAdminQuestion,
+  deletePromoCode,
+  downloadProgressReport,
   getAllProgress,
   getAdminQuestions,
+  getAdminPromos,
   getBootstrap,
+  getDailyChallenge,
   getLeaderboard,
   getRoutes,
   getSession,
@@ -25,12 +42,19 @@ import {
   resetLevel,
   resetProgress,
   selectLevel,
+  submitDailyChallenge,
   submitAnswer,
   updateProfile,
   updateAdminQuestion,
+  updatePromoCode,
 } from "./api";
 import { FrogAvatar, FrogFamily, PrimitiveFrog } from "./components/FrogArt";
 import { useRouteHearts } from "./hooks/useRouteHearts";
+import {
+  SOURCE_LOCALE,
+  useAutoDocumentTitleTranslation,
+  useAutoPageTranslation,
+} from "./pageTranslator";
 import type {
   AccountUpdatePayload,
   AdminQuestion,
@@ -38,9 +62,13 @@ import type {
   AnswerResult,
   AuthResponse,
   Credentials,
+  DailyChallengeResponse,
+  DailyChallengeSubmitResponse,
   LeaderboardMetric,
   LeaderboardEntry,
   Progress,
+  PromoCode,
+  PromoCodePayload,
   PromoRedeemPayload,
   Question,
   QuestionDraft,
@@ -54,6 +82,7 @@ type View =
   | "menu"
   | "difficulty"
   | "quiz"
+  | "daily"
   | "shop"
   | "account"
   | "leaderboard"
@@ -76,20 +105,20 @@ type RoundResult = {
   routeTitle: string;
 };
 
-const DEFAULT_TOPIC = "python-easy";
-const HEARTS_PER_LEVEL = 3;
-const APP_TITLE = "Froggy Coder";
-const AUTH_SCENE_STYLE: CSSProperties = {
-  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.18), rgba(8, 18, 14, 0.74)), url(${bolotoBackdrop})`,
-};
-const MENU_SCENE_STYLE: CSSProperties = {
-  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.16), rgba(8, 18, 14, 0.76)), url(${swampBackdrop})`,
-};
-const RESULT_SCENE_STYLE: CSSProperties = {
-  backgroundImage: `linear-gradient(180deg, rgba(8, 18, 14, 0.12), rgba(8, 18, 14, 0.68)), url(${winBackdrop})`,
+type PromoDraftState = {
+  code: string;
+  description: string;
+  reward_coins: string;
+  unlock_all_levels: boolean;
+  is_active: boolean;
 };
 
-function createEmptyDraft(topic = DEFAULT_TOPIC): QuestionDraft {
+const DEFAULT_TOPIC = "python-easy";
+const HEARTS_PER_LEVEL = 3;
+const QUESTION_TIMER_SECONDS = 20;
+function createEmptyDraft(locale: AppLocale = "ru", topic = DEFAULT_TOPIC): QuestionDraft {
+  const copy = createAppCopy(locale);
+
   return {
     topic,
     type: "choice",
@@ -97,8 +126,8 @@ function createEmptyDraft(topic = DEFAULT_TOPIC): QuestionDraft {
     explanation: "",
     placeholder: "",
     order_index: "0",
-    options_text: "Вариант 1\nВариант 2",
-    answers_text: "Вариант 1",
+    options_text: copy.admin.defaultOptionsText,
+    answers_text: copy.admin.defaultAnswersText,
   };
 }
 
@@ -111,43 +140,61 @@ function createEmptyAccountForm(activeUser: User | null = null): AccountFormStat
   };
 }
 
+function createEmptyPromoDraft(): PromoDraftState {
+  return {
+    code: "",
+    description: "",
+    reward_coins: "0",
+    unlock_all_levels: false,
+    is_active: true,
+  };
+}
+
 function normalizeWhitespace(value: string) {
   return value.trim().replace(/\s+/g, " ");
 }
 
-function formatDate(value: string | null) {
-  if (!value) {
-    return "нет данных";
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toLocaleString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+function formatDate(value: string | null, locale: AppLocale) {
+  return formatAppDate(value, locale);
 }
 
-function getRouteTitle(route: RouteOption | null) {
+function formatTime(value: string | null, locale: AppLocale) {
+  return formatAppTime(value, locale);
+}
+
+function getRouteTitle(route: RouteOption | null, routeNotSelectedLabel: string) {
   if (!route) {
-    return "Маршрут не выбран";
+    return routeNotSelectedLabel;
   }
 
   return `${route.language} • ${route.difficulty_label}`;
 }
 
-function getRouteTaskSummary(route: RouteOption) {
-  return `${route.levels_total} уровней по ${route.tasks_per_level} задач`;
+function getRouteTaskSummary(route: RouteOption, locale: AppLocale) {
+  return createAppCopy(locale).formatTaskSummary(route.levels_total, route.tasks_per_level);
 }
 
-function getRouteContentHint(route: RouteOption) {
-  return getRouteTaskSummary(route);
+function getRouteContentHint(route: RouteOption, locale: AppLocale) {
+  return getRouteTaskSummary(route, locale);
+}
+
+function getSceneStyle(theme: ThemeMode, backdrop: string, variant: "auth" | "menu" | "result") {
+  const overlays: Record<ThemeMode, Record<typeof variant, string>> = {
+    dark: {
+      auth: "linear-gradient(180deg, rgba(8, 18, 14, 0.18), rgba(8, 18, 14, 0.74))",
+      menu: "linear-gradient(180deg, rgba(8, 18, 14, 0.16), rgba(8, 18, 14, 0.76))",
+      result: "linear-gradient(180deg, rgba(8, 18, 14, 0.12), rgba(8, 18, 14, 0.68))",
+    },
+    light: {
+      auth: "linear-gradient(180deg, rgba(255, 255, 255, 0.24), rgba(241, 247, 243, 0.88))",
+      menu: "linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(237, 244, 239, 0.9))",
+      result: "linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(232, 241, 235, 0.88))",
+    },
+  };
+
+  return {
+    backgroundImage: `${overlays[theme][variant]}, url(${backdrop})`,
+  } satisfies CSSProperties;
 }
 
 function getUserHandle(entity: Pick<User, "full_username" | "username" | "tag">) {
@@ -167,6 +214,14 @@ function getUniqueLanguages(routes: RouteOption[]) {
 function App() {
   const [view, setView] = useState<View>("auth");
   const [authMode, setAuthMode] = useState<AuthMode>("register");
+  const [uiLocale, setUiLocale] = useState<AppLocale>(() => getStoredLocale());
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getStoredTheme());
+  const sourceLocale: AppLocale = SOURCE_LOCALE;
+  const copy = createAppCopy(SOURCE_LOCALE);
+  const sourcePageTitle = `${copy.appTitle} • ${copy.heroTitle}`;
+  const appPanelRef = useRef<HTMLElement | null>(null);
+  useAutoPageTranslation(appPanelRef, sourceLocale, uiLocale);
+  useAutoDocumentTitleTranslation(sourcePageTitle, SOURCE_LOCALE, uiLocale);
 
   const [user, setUser] = useState<User | null>(null);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
@@ -181,11 +236,13 @@ function App() {
   const [leaderboardMetric, setLeaderboardMetric] =
     useState<LeaderboardMetric>("coins");
   const [leaderboardMetricLabel, setLeaderboardMetricLabel] =
-    useState("Монеты");
+    useState(createAppCopy(SOURCE_LOCALE).leaderboard.coins);
   const [leaderboardScope, setLeaderboardScope] = useState<"route" | "global">("global");
   const [shopItems, setShopItems] = useState<ShopItem[]>([]);
   const [adminQuestions, setAdminQuestions] = useState<AdminQuestion[]>([]);
+  const [adminPromos, setAdminPromos] = useState<PromoCode[]>([]);
   const [selectedAdminQuestionId, setSelectedAdminQuestionId] = useState<number | null>(null);
+  const [editingPromoCode, setEditingPromoCode] = useState<string | null>(null);
 
   const [authForm, setAuthForm] = useState<Credentials>({
     username: "",
@@ -195,6 +252,7 @@ function App() {
     createEmptyAccountForm(),
   );
   const [promoCode, setPromoCode] = useState("");
+  const [promoDraft, setPromoDraft] = useState<PromoDraftState>(() => createEmptyPromoDraft());
 
   const [selectedOption, setSelectedOption] = useState("");
   const [typedAnswer, setTypedAnswer] = useState("");
@@ -202,6 +260,9 @@ function App() {
   const [feedbackAction, setFeedbackAction] = useState<FeedbackAction>(null);
   const [pendingProgress, setPendingProgress] = useState<Progress | null>(null);
   const [displayIndex, setDisplayIndex] = useState(0);
+  const [timerEnabled, setTimerEnabled] = useState(false);
+  const [timeLeft, setTimeLeft] = useState(QUESTION_TIMER_SECONDS);
+  const [timedOutQuestionId, setTimedOutQuestionId] = useState<number | null>(null);
   const {
     hearts,
     setHearts,
@@ -212,13 +273,21 @@ function App() {
   } = useRouteHearts(HEARTS_PER_LEVEL);
   const [showHint, setShowHint] = useState(false);
   const [roundResult, setRoundResult] = useState<RoundResult | null>(null);
+  const [dailyChallenge, setDailyChallenge] = useState<DailyChallengeResponse | null>(null);
+  const [dailySelectedOption, setDailySelectedOption] = useState("");
+  const [dailyTypedAnswer, setDailyTypedAnswer] = useState("");
+  const [dailyResult, setDailyResult] = useState<DailyChallengeSubmitResponse | null>(null);
 
-  const [draft, setDraft] = useState<QuestionDraft>(() => createEmptyDraft());
+  const [draft, setDraft] = useState<QuestionDraft>(() => createEmptyDraft(SOURCE_LOCALE));
   const [editingQuestionId, setEditingQuestionId] = useState<number | null>(null);
 
   const [busyLabel, setBusyLabel] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+
+  const authSceneStyle = getSceneStyle(themeMode, bolotoBackdrop, "auth");
+  const menuSceneStyle = getSceneStyle(themeMode, swampBackdrop, "menu");
+  const resultSceneStyle = getSceneStyle(themeMode, winBackdrop, "result");
 
   const languageOptions = getUniqueLanguages(routes);
   const difficultyOptions = routes.filter((route) => route.language === selectedLanguage);
@@ -238,6 +307,108 @@ function App() {
   useEffect(() => {
     void hydrateSession("menu", null, true);
   }, []);
+
+  useEffect(() => {
+    const htmlRoot = document.documentElement;
+    htmlRoot.dataset.theme = themeMode;
+    htmlRoot.lang = getHtmlLang(uiLocale);
+    htmlRoot.style.colorScheme = themeMode;
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, uiLocale);
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+  }, [themeMode, uiLocale]);
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    let active = true;
+
+    async function refreshLocalizedContent() {
+      try {
+        const routeResponse = await getRoutes(uiLocale);
+        if (!active) {
+          return;
+        }
+
+        setRoutes(routeResponse.items);
+
+        const localizedCurrentRoute =
+          currentRoute
+            ? routeResponse.items.find((route) => route.topic === currentRoute.topic) ?? currentRoute
+            : null;
+
+        if (localizedCurrentRoute) {
+          setCurrentRoute(localizedCurrentRoute);
+
+          if (view === "result") {
+            setRoundResult((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    routeTitle: getRouteTitle(localizedCurrentRoute, copy.common.routeNotSelected),
+                  }
+                : prev,
+            );
+          }
+        }
+
+        if (view === "quiz" && localizedCurrentRoute) {
+          await loadRoute(localizedCurrentRoute, "quiz");
+        } else if (view === "daily") {
+          await openDailyChallenge();
+        } else if (view === "leaderboard") {
+          await refreshLeaderboard(localizedCurrentRoute?.topic, leaderboardMetric);
+        } else if (view === "shop") {
+          await openShop();
+        } else if (view === "admin") {
+          await openAdmin(localizedCurrentRoute?.topic ?? accountRouteTopic ?? routeResponse.items[0]?.topic);
+        }
+      } catch {
+        // Keep the current content if the localized refresh fails.
+      }
+    }
+
+    void refreshLocalizedContent();
+    return () => {
+      active = false;
+    };
+  }, [uiLocale]);
+
+  useEffect(() => {
+    if (leaderboardMetric === "coins") {
+      setLeaderboardMetricLabel(copy.leaderboard.coins);
+    }
+  }, [copy.leaderboard.coins, leaderboardMetric]);
+
+  useEffect(() => {
+    if (view !== "quiz" || !timerEnabled || !currentQuestion || feedback !== null) {
+      return;
+    }
+
+    setTimeLeft(QUESTION_TIMER_SECONDS);
+    setTimedOutQuestionId(null);
+  }, [view, timerEnabled, currentQuestion?.id]);
+
+  useEffect(() => {
+    if (view !== "quiz" || !timerEnabled || !currentQuestion || feedback !== null) {
+      return;
+    }
+
+    if (timeLeft <= 0) {
+      if (timedOutQuestionId !== currentQuestion.id) {
+        setTimedOutQuestionId(currentQuestion.id);
+        void handleTimedOutQuestion();
+      }
+      return;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setTimeLeft((prev) => prev - 1);
+    }, 1000);
+
+    return () => window.clearTimeout(timerId);
+  }, [view, timerEnabled, currentQuestion?.id, feedback, timeLeft, timedOutQuestionId]);
 
   function rememberProgress(nextProgress: Progress) {
     setRouteProgressCache((prev) => ({
@@ -261,11 +432,24 @@ function App() {
     setFeedback(null);
     setFeedbackAction(null);
     setPendingProgress(null);
+    setTimedOutQuestionId(null);
+    setTimeLeft(QUESTION_TIMER_SECONDS);
+  }
+
+  function resetDailyUi() {
+    setDailySelectedOption("");
+    setDailyTypedAnswer("");
+    setDailyResult(null);
   }
 
   function resetDraftForm(topic = currentRoute?.topic ?? routes[0]?.topic ?? DEFAULT_TOPIC) {
-    setDraft(createEmptyDraft(topic));
+    setDraft(createEmptyDraft(SOURCE_LOCALE, topic));
     setEditingQuestionId(null);
+  }
+
+  function resetPromoDraft() {
+    setPromoDraft(createEmptyPromoDraft());
+    setEditingPromoCode(null);
   }
 
   function resetAccountForm(activeUser: User | null = user) {
@@ -289,12 +473,22 @@ function App() {
     setRouteProgressCache({});
     setLeaderboard([]);
     setLeaderboardMetric("coins");
-    setLeaderboardMetricLabel("Монеты");
+    setLeaderboardMetricLabel(copy.leaderboard.coins);
     setLeaderboardScope("global");
     setShopItems([]);
     setAdminQuestions([]);
+    setAdminPromos([]);
+    setEditingPromoCode(null);
+    setPromoDraft(createEmptyPromoDraft());
     setRoundResult(null);
     resetHeartsState();
+    setTimerEnabled(false);
+    setTimeLeft(QUESTION_TIMER_SECONDS);
+    setTimedOutQuestionId(null);
+    setDailyChallenge(null);
+    setDailySelectedOption("");
+    setDailyTypedAnswer("");
+    setDailyResult(null);
     setShowHint(false);
     resetQuestionUi();
     resetDraftForm(DEFAULT_TOPIC);
@@ -312,7 +506,7 @@ function App() {
       return;
     }
 
-    setErrorMessage("Произошла ошибка. Попробуйте еще раз.");
+    setErrorMessage(copy.status.genericApiFailure);
   }
 
   async function hydrateSession(
@@ -320,7 +514,7 @@ function App() {
     sessionResponse: AuthResponse | null = null,
     silentAuthFailure = false,
   ) {
-    setBusyLabel("Загружаем профиль...");
+    setBusyLabel(copy.status.loadingProfile);
     setErrorMessage("");
 
     try {
@@ -328,7 +522,7 @@ function App() {
       storeSession(activeSession);
 
       const [routeResponse, progressResponse] = await Promise.all([
-        getRoutes(),
+        getRoutes(uiLocale),
         getAllProgress(),
       ]);
 
@@ -343,7 +537,7 @@ function App() {
       setDraft((prev) =>
         routeResponse.items.some((route) => route.topic === prev.topic)
           ? prev
-          : createEmptyDraft(routeResponse.items[0]?.topic ?? DEFAULT_TOPIC),
+          : createEmptyDraft(SOURCE_LOCALE, routeResponse.items[0]?.topic ?? DEFAULT_TOPIC),
       );
       setView(nextView);
     } catch (error) {
@@ -364,14 +558,14 @@ function App() {
       return false;
     }
 
-    setBusyLabel("Загружаем маршрут...");
+    setBusyLabel(copy.status.loadingRoute);
     setErrorMessage("");
     setSuccessMessage("");
 
     try {
       const [bootstrap, leaderboardResponse] = await Promise.all([
-        getBootstrap(route.topic),
-        getLeaderboard(route.topic, leaderboardMetric),
+        getBootstrap(route.topic, uiLocale),
+        getLeaderboard(route.topic, leaderboardMetric, uiLocale),
       ]);
 
       setCurrentRoute(route);
@@ -410,7 +604,7 @@ function App() {
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusyLabel(authMode === "login" ? "Выполняем вход..." : "Создаем аккаунт...");
+    setBusyLabel(authMode === "login" ? copy.status.loggingIn : copy.status.creatingAccount);
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -427,8 +621,8 @@ function App() {
       setAuthForm({ username: "", password: "" });
       setSuccessMessage(
         authMode === "login"
-          ? "Вход выполнен. Можно продолжать обучение."
-          : `Аккаунт создан. Для входа используйте логин ${response.user.full_username}.`,
+          ? copy.auth.successLogin
+          : copy.auth.successRegister(response.user.full_username),
       );
       await hydrateSession("menu", response);
     } catch (error) {
@@ -444,7 +638,7 @@ function App() {
       return;
     }
 
-    setBusyLabel("Выходим...");
+    setBusyLabel(copy.status.loggingOut);
     setErrorMessage("");
 
     try {
@@ -466,7 +660,11 @@ function App() {
       return;
     }
 
-    const response = await getLeaderboard(topic, metricOverride ?? leaderboardMetric);
+    const response = await getLeaderboard(
+      topic,
+      metricOverride ?? leaderboardMetric,
+      uiLocale,
+    );
     setLeaderboard(response.entries);
     setLeaderboardMetric(response.metric);
     setLeaderboardMetricLabel(response.metric_label);
@@ -487,7 +685,7 @@ function App() {
       return;
     }
 
-    setBusyLabel("Загружаем таблицу лидеров...");
+    setBusyLabel(copy.status.loadingLeaderboard);
     setErrorMessage("");
 
     try {
@@ -501,16 +699,37 @@ function App() {
     }
   }
 
+  async function openDailyChallenge() {
+    if (!user) {
+      return;
+    }
+
+    setBusyLabel(copy.status.loadingDaily);
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const response = await getDailyChallenge(uiLocale);
+      setDailyChallenge(response);
+      resetDailyUi();
+      setView("daily");
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
   async function openAdmin(topicOverride?: string) {
     if (!user?.is_admin) {
       return;
     }
 
-    setBusyLabel("Загружаем панель управления...");
+    setBusyLabel(copy.status.loadingAdmin);
     setErrorMessage("");
 
     try {
-      const routeResponse = await getRoutes();
+      const routeResponse = await getRoutes(uiLocale);
       const nextRoutes = routeResponse.items;
       const route =
         nextRoutes.find((item) => item.topic === topicOverride) ??
@@ -524,17 +743,29 @@ function App() {
         return;
       }
 
-      const data = await getAdminQuestions(route.topic);
+      const [data, promoResponse] = await Promise.all([
+        getAdminQuestions(route.topic, uiLocale),
+        getAdminPromos(uiLocale),
+      ]);
       setRoutes(nextRoutes);
       setCurrentRoute(route);
       setSelectedLanguage(route.language);
       setAdminQuestions(data);
+      setAdminPromos(promoResponse.items);
       setSelectedAdminQuestionId((prev) =>
         data.some((question) => question.id === prev) ? prev : (data[0]?.id ?? null),
       );
-      setDraft((prev) =>
-        shouldResetForms || prev.topic !== route.topic ? createEmptyDraft(route.topic) : prev,
+      setEditingPromoCode((prev) =>
+        promoResponse.items.some((promo) => promo.code === prev) ? prev : null,
       );
+      setDraft((prev) =>
+        shouldResetForms || prev.topic !== route.topic
+          ? createEmptyDraft(SOURCE_LOCALE, route.topic)
+          : prev,
+      );
+      if (!promoResponse.items.some((promo) => promo.code === editingPromoCode)) {
+        resetPromoDraft();
+      }
       setView("admin");
     } catch (error) {
       handleApiFailure(error);
@@ -556,17 +787,43 @@ function App() {
       return;
     }
 
-    setBusyLabel("Загружаем магазин...");
+    setBusyLabel(copy.status.loadingShop);
     setErrorMessage("");
 
     try {
-      const response = await getShop();
+      const response = await getShop(uiLocale);
       setUser(response.user);
       setShopItems(response.items);
       if (response.message) {
         setSuccessMessage(response.message);
       }
       setView("shop");
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleDownloadProgressReport() {
+    if (!user) {
+      return;
+    }
+
+    setBusyLabel(copy.status.preparingPdf);
+    setErrorMessage("");
+
+    try {
+      const blob = await downloadProgressReport();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "froggy-progress-report.pdf";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setSuccessMessage(copy.account.pdfReady);
     } catch (error) {
       handleApiFailure(error);
     } finally {
@@ -623,18 +880,18 @@ function App() {
     const confirmPassword = accountForm.confirmPassword.trim();
 
     if (newPassword !== confirmPassword) {
-      setErrorMessage("Новый пароль и подтверждение должны совпадать.");
+      setErrorMessage(copy.status.profilePasswordMismatch);
       setSuccessMessage("");
       return;
     }
 
     if (currentPassword && !newPassword) {
-      setErrorMessage("Чтобы сменить пароль, укажите новый пароль.");
+      setErrorMessage(copy.status.profilePasswordMissing);
       setSuccessMessage("");
       return;
     }
 
-    setBusyLabel("Сохраняем профиль...");
+    setBusyLabel(copy.status.savingProfile);
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -654,7 +911,7 @@ function App() {
       const nextUser = await updateProfile(payload);
       setUser(nextUser);
       resetAccountForm(nextUser);
-      setSuccessMessage("Профиль обновлен.");
+      setSuccessMessage(copy.account.profileSaved);
 
       if (currentRoute || leaderboard.length > 0) {
         await refreshLeaderboard(currentRoute?.topic, leaderboardMetric);
@@ -674,18 +931,18 @@ function App() {
 
     const code = promoCode.trim();
     if (!code) {
-      setErrorMessage("Введите промокод.");
+      setErrorMessage(copy.status.promoCodeEmpty);
       setSuccessMessage("");
       return;
     }
 
-    setBusyLabel("Проверяем промокод...");
+    setBusyLabel(copy.status.checkingPromo);
     setErrorMessage("");
     setSuccessMessage("");
 
     try {
       const payload: PromoRedeemPayload = { code };
-      const response = await redeemPromoCode(payload);
+      const response = await redeemPromoCode(payload, uiLocale);
       setUser(response.user);
       replaceProgressCache(response.progresses);
       if (currentRoute) {
@@ -697,10 +954,60 @@ function App() {
         }
       }
       setPromoCode("");
-      setSuccessMessage(response.message);
+      setSuccessMessage(response.message || copy.account.promoActivated);
 
       if (leaderboardMetric === "coins") {
         await refreshLeaderboard(undefined, "coins");
+      }
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleDailyChallengeSubmit() {
+    if (!dailyChallenge || dailyChallenge.already_answered || dailyResult) {
+      return;
+    }
+
+    const answer =
+      dailyChallenge.question.type === "choice" ? dailySelectedOption : dailyTypedAnswer;
+
+    if (!answer.trim()) {
+      setErrorMessage(copy.status.dailyAnswerEmpty);
+      setSuccessMessage("");
+      return;
+    }
+
+    setBusyLabel(copy.status.checkingDaily);
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const response = await submitDailyChallenge({ answer }, uiLocale);
+      setDailyResult(response);
+      setDailyChallenge((prev) =>
+        prev
+          ? {
+              ...prev,
+              already_answered: true,
+              result: {
+                is_correct: response.is_correct,
+                correct_answers: response.correct_answers,
+                explanation: response.explanation,
+                reward_coins: response.reward_coins,
+                answered_at: response.answered_at,
+              },
+              leaderboard: response.leaderboard,
+            }
+          : prev,
+      );
+      setUser(response.user);
+      if (response.is_correct) {
+        setSuccessMessage(copy.daily.answerCorrect(response.reward_coins));
+      } else {
+        setSuccessMessage(copy.daily.answerSavedWrong);
       }
     } catch (error) {
       handleApiFailure(error);
@@ -714,15 +1021,15 @@ function App() {
       return;
     }
 
-    setBusyLabel("Обновляем каталог предметов...");
+    setBusyLabel(copy.status.updatingCatalog);
     setErrorMessage("");
     setSuccessMessage("");
 
     try {
-      const response = await buyOrEquipShopItem(itemId);
+      const response = await buyOrEquipShopItem(itemId, uiLocale);
       setUser(response.user);
       setShopItems(response.items);
-      setSuccessMessage(response.message ?? "Данные магазина обновлены.");
+      setSuccessMessage(response.message ?? copy.shop.catalogUpdated);
 
       if (leaderboardMetric === "coins") {
         await refreshLeaderboard(undefined, "coins");
@@ -743,7 +1050,7 @@ function App() {
       return;
     }
 
-    setBusyLabel("Подготавливаем уровень...");
+    setBusyLabel(copy.status.preparingLevel);
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -787,7 +1094,7 @@ function App() {
       return;
     }
 
-    setBusyLabel("Сбрасываем прогресс маршрута...");
+    setBusyLabel(copy.status.resettingRoute);
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -814,14 +1121,12 @@ function App() {
       return;
     }
 
-    const confirmed = window.confirm(
-      "Сбросить прогресс по всем маршрутам? Монеты, покупки и данные профиля сохранятся.",
-    );
+    const confirmed = window.confirm(copy.status.resetConfirm);
     if (!confirmed) {
       return;
     }
 
-    setBusyLabel("Сбрасываем общий прогресс...");
+    setBusyLabel(copy.status.resettingAll);
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -845,7 +1150,7 @@ function App() {
         setDisplayIndex(0);
       }
 
-      setSuccessMessage("Прогресс по всем маршрутам сброшен.");
+      setSuccessMessage(copy.status.resetAllSuccess);
     } catch (error) {
       handleApiFailure(error);
     } finally {
@@ -853,20 +1158,21 @@ function App() {
     }
   }
 
-  async function handleSubmitAnswer() {
-    if (!user || !currentRoute || !currentQuestion || !canSubmitAnswer) {
+  async function submitCurrentAnswer(answerOverride?: string, force = false) {
+    if (!user || !currentRoute || !currentQuestion || (!force && !canSubmitAnswer)) {
       return;
     }
 
-    setBusyLabel("Проверяем ответ...");
+    setBusyLabel(copy.status.checkingAnswer);
     setErrorMessage("");
 
     try {
+      const answerToSubmit = answerOverride ?? currentAnswer;
       const result = await submitAnswer({
         topic: currentRoute.topic,
         question_id: currentQuestion.id,
-        answer: currentAnswer,
-      });
+        answer: answerToSubmit,
+      }, uiLocale);
       setUser(result.user);
 
       let nextFeedbackAction: FeedbackAction = "retry";
@@ -881,7 +1187,7 @@ function App() {
             totalQuestions: result.total_questions,
             bestScore: result.next_progress.best_score,
             completedRuns: result.next_progress.completed_runs,
-            routeTitle: getRouteTitle(currentRoute),
+            routeTitle: getRouteTitle(currentRoute, copy.common.routeNotSelected),
           });
           await refreshLeaderboard(currentRoute.topic, leaderboardMetric);
         }
@@ -907,6 +1213,19 @@ function App() {
     }
   }
 
+  async function handleSubmitAnswer() {
+    await submitCurrentAnswer();
+  }
+
+  async function handleTimedOutQuestion() {
+    if (!currentQuestion || feedback !== null) {
+      return;
+    }
+
+    setErrorMessage(copy.status.timeOut);
+    await submitCurrentAnswer(" ", true);
+  }
+
   function handleNextAfterFeedback() {
     if (!feedback || !currentRoute || !currentQuestion) {
       return;
@@ -926,23 +1245,23 @@ function App() {
       return;
     }
 
-      if (feedbackAction === "advance" && pendingProgress) {
-        setProgress(pendingProgress);
-        rememberProgress(pendingProgress);
-        setDisplayIndex(pendingProgress.current_index);
-        if (pendingProgress.current_level_index !== currentQuestion.level_index) {
-          syncLevelHearts(currentRoute.topic, pendingProgress.current_level_index, HEARTS_PER_LEVEL);
-        } else {
-          setHearts(
-            getStoredHearts(
-              currentRoute.topic,
-              currentQuestion.level_index,
-              pendingProgress.remaining_hearts,
-            ),
-          );
-        }
-        setShowHint(false);
+    if (feedbackAction === "advance" && pendingProgress) {
+      setProgress(pendingProgress);
+      rememberProgress(pendingProgress);
+      setDisplayIndex(pendingProgress.current_index);
+      if (pendingProgress.current_level_index !== currentQuestion.level_index) {
+        syncLevelHearts(currentRoute.topic, pendingProgress.current_level_index, HEARTS_PER_LEVEL);
+      } else {
+        setHearts(
+          getStoredHearts(
+            currentRoute.topic,
+            currentQuestion.level_index,
+            pendingProgress.remaining_hearts,
+          ),
+        );
       }
+      setShowHint(false);
+    }
 
     if (feedbackAction === "level-reset" && pendingProgress) {
       setProgress(pendingProgress);
@@ -968,7 +1287,7 @@ function App() {
       options_text: question.options.join("\n"),
       answers_text: question.correct_answers.join("\n"),
     });
-    setSuccessMessage("Вопрос открыт для редактирования.");
+    setSuccessMessage(copy.admin.questionOpened);
     setErrorMessage("");
   }
 
@@ -995,13 +1314,38 @@ function App() {
     };
   }
 
+  function buildPromoPayload(): PromoCodePayload {
+    const rewardCoins = Number.parseInt(promoDraft.reward_coins || "0", 10);
+
+    return {
+      code: promoDraft.code.trim().toUpperCase(),
+      description: normalizeWhitespace(promoDraft.description),
+      reward_coins: Number.isNaN(rewardCoins) ? 0 : rewardCoins,
+      unlock_all_levels: promoDraft.unlock_all_levels,
+      is_active: promoDraft.is_active,
+    };
+  }
+
+  function beginEditPromo(promo: PromoCode) {
+    setEditingPromoCode(promo.code);
+    setPromoDraft({
+      code: promo.code,
+      description: promo.description,
+      reward_coins: String(promo.reward_coins),
+      unlock_all_levels: promo.unlock_all_levels,
+      is_active: promo.is_active,
+    });
+    setSuccessMessage(copy.admin.promoOpened);
+    setErrorMessage("");
+  }
+
   async function handleSaveQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!user?.is_admin) {
       return;
     }
 
-    setBusyLabel(editingQuestionId ? "Сохраняем вопрос..." : "Добавляем вопрос...");
+    setBusyLabel(editingQuestionId ? copy.status.savingQuestion : copy.status.addingQuestion);
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -1010,14 +1354,42 @@ function App() {
 
       if (editingQuestionId) {
         await updateAdminQuestion(editingQuestionId, payload);
-        setSuccessMessage("Вопрос обновлен.");
+        setSuccessMessage(copy.admin.questionSaved);
       } else {
         await createAdminQuestion(payload);
-        setSuccessMessage("Вопрос добавлен.");
+        setSuccessMessage(copy.admin.questionAdded);
       }
 
       resetDraftForm(payload.topic);
       await openAdmin(payload.topic);
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  async function handleSavePromo(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user?.is_admin) {
+      return;
+    }
+
+    setBusyLabel(editingPromoCode ? copy.status.savingPromo : copy.status.addingPromo);
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const payload = buildPromoPayload();
+      if (editingPromoCode) {
+        await updatePromoCode(editingPromoCode, payload);
+        setSuccessMessage(copy.admin.promoSaved);
+      } else {
+        await createPromoCode(payload);
+        setSuccessMessage(copy.admin.promoAdded);
+      }
+      resetPromoDraft();
+      await openAdmin(currentRoute?.topic);
     } catch (error) {
       handleApiFailure(error);
     } finally {
@@ -1030,12 +1402,12 @@ function App() {
       return;
     }
 
-    const confirmed = window.confirm("Удалить вопрос?");
+    const confirmed = window.confirm(copy.status.deletingQuestion);
     if (!confirmed) {
       return;
     }
 
-    setBusyLabel("Удаляем вопрос...");
+    setBusyLabel(copy.status.deletingQuestion);
     setErrorMessage("");
     setSuccessMessage("");
 
@@ -1044,7 +1416,7 @@ function App() {
       if (editingQuestionId === questionId) {
         resetDraftForm();
       }
-      setSuccessMessage("Вопрос удален.");
+      setSuccessMessage(copy.admin.questionDeleted);
       await openAdmin(draft.topic);
     } catch (error) {
       handleApiFailure(error);
@@ -1053,10 +1425,90 @@ function App() {
     }
   }
 
+  async function handleDeletePromo(code: string) {
+    if (!user?.is_admin) {
+      return;
+    }
+
+    const confirmed = window.confirm(copy.status.deletingPromo(code));
+    if (!confirmed) {
+      return;
+    }
+
+    setBusyLabel(copy.status.deletingPromo(code));
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      await deletePromoCode(code);
+      if (editingPromoCode === code) {
+        resetPromoDraft();
+      }
+      setSuccessMessage(copy.admin.promoDeleted);
+      await openAdmin(currentRoute?.topic);
+    } catch (error) {
+      handleApiFailure(error);
+    } finally {
+      setBusyLabel("");
+    }
+  }
+
+  function getTopNavButtonClass(isActive: boolean) {
+    return `button button--ghost${isActive ? " top-nav__button--active" : ""}`;
+  }
+
+  function renderSettingsBar() {
+    return (
+      <div className="settings-bar">
+        <div className="settings-bar__group">
+          <span className="settings-bar__label">{copy.settings.themeLabel}</span>
+          <div className="settings-bar__toggle" role="group" aria-label={copy.settings.themeLabel}>
+            {(["dark", "light"] as ThemeMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`settings-bar__toggle-btn ${
+                  themeMode === mode ? "settings-bar__toggle-btn--active" : ""
+                }`}
+                onClick={() => setThemeMode(mode)}
+                aria-pressed={themeMode === mode}
+              >
+                {copy.settings.themeNames[mode]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="settings-bar__group settings-bar__select">
+          <span className="settings-bar__label">{copy.settings.languageLabel}</span>
+          <select
+            value={uiLocale}
+            onChange={(event) => setUiLocale(event.target.value as AppLocale)}
+            aria-label={copy.settings.languageLabel}
+          >
+            {copy.localeOrder.map((locale) => (
+              <option key={locale} value={locale}>
+                {copy.settings.localeNames[locale]}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    );
+  }
+
   function renderTopNav() {
     if (!user) {
       return null;
     }
+
+    const isMenuActive = view === "menu";
+    const isAccountActive = view === "account";
+    const isLevelsActive = view === "difficulty" || view === "quiz" || view === "result";
+    const isLeaderboardActive = view === "leaderboard";
+    const isDailyActive = view === "daily";
+    const isShopActive = view === "shop";
+    const isAdminActive = view === "admin";
 
     return (
       <div className="top-nav">
@@ -1068,11 +1520,11 @@ function App() {
             frogSize={46}
           />
           <div>
-            <strong>{getUserHandle(user)}</strong>
+            <strong translate="no">{getUserHandle(user)}</strong>
             <span>
               {currentRoute
-                ? `Маршрут: ${getRouteTitle(currentRoute)}`
-                : "Выберите язык и сложность"}
+                ? `${copy.common.route}: ${getRouteTitle(currentRoute, copy.common.routeNotSelected)}`
+                : copy.common.chooseLanguageAndDifficulty}
             </span>
             <div className="top-nav__chips">
               {user.tag && <span className="top-nav__chip">🏷️ #{user.tag}</span>}
@@ -1085,34 +1537,59 @@ function App() {
         </div>
 
         <div className="top-nav__actions">
-          <button className="button button--ghost" onClick={() => setView("menu")}>
-            Главная
-          </button>
-          <button className="button button--ghost" onClick={openAccount}>
-            Аккаунт
+          <button
+            className={getTopNavButtonClass(isMenuActive)}
+            aria-current={isMenuActive ? "page" : undefined}
+            onClick={() => setView("menu")}
+          >
+            {copy.common.home}
           </button>
           <button
-            className="button button--ghost"
+            className={getTopNavButtonClass(isAccountActive)}
+            aria-current={isAccountActive ? "page" : undefined}
+            onClick={openAccount}
+          >
+            {copy.common.account}
+          </button>
+          <button
+            className={getTopNavButtonClass(isLevelsActive)}
+            aria-current={isLevelsActive ? "page" : undefined}
             onClick={() => setView(currentRoute ? "difficulty" : "menu")}
           >
-            Уровни
+            {copy.common.levels}
           </button>
           <button
-            className="button button--ghost"
+            className={getTopNavButtonClass(isLeaderboardActive)}
+            aria-current={isLeaderboardActive ? "page" : undefined}
             onClick={() => void openLeaderboard()}
           >
-            Лидеры
+            {copy.common.leaderboard}
           </button>
-          <button className="button button--ghost" onClick={() => void openShop()}>
-            Магазин
+          <button
+            className={getTopNavButtonClass(isDailyActive)}
+            aria-current={isDailyActive ? "page" : undefined}
+            onClick={() => void openDailyChallenge()}
+          >
+            {copy.common.daily}
+          </button>
+          <button
+            className={getTopNavButtonClass(isShopActive)}
+            aria-current={isShopActive ? "page" : undefined}
+            onClick={() => void openShop()}
+          >
+            {copy.common.shop}
           </button>
           {user.is_admin && (
-            <button className="button button--ghost" onClick={() => void openAdmin()}>
-              Админка
+            <button
+              className={getTopNavButtonClass(isAdminActive)}
+              aria-current={isAdminActive ? "page" : undefined}
+              onClick={() => void openAdmin()}
+            >
+              {copy.common.admin}
             </button>
           )}
           <button className="button button--ghost" onClick={handleLogout}>
-            Выйти
+            {copy.common.logout}
           </button>
         </div>
       </div>
@@ -1139,14 +1616,11 @@ function App() {
     return (
       <section className="card card--auth">
         <div className="auth-layout">
-          <div className="auth-overview" style={AUTH_SCENE_STYLE}>
+          <div className="auth-overview" style={authSceneStyle}>
             <div className="auth-overview__glass">
               <div className="auth-overview__intro">
-                <h2>Аккаунт Froggy Coder</h2>
-                <p className="auth-overview__text">
-                  Вход в приложение с маршрутами по программированию, прогрессом по уровням
-                  и наградами за правильные ответы.
-                </p>
+                <h2>{copy.auth.eyebrow}</h2>
+                <p className="auth-overview__text">{copy.auth.intro}</p>
               </div>
 
               <div className="auth-benefits">
@@ -1155,11 +1629,8 @@ function App() {
                     🗺️
                   </span>
                   <div>
-                    <strong>Маршруты и уровни</strong>
-                    <p>
-                      Выбирайте язык, сложность и проходите уровни по Python и
-                      JavaScript в удобном темпе.
-                    </p>
+                    <strong>{copy.auth.benefitRoutesTitle}</strong>
+                    <p>{copy.auth.benefitRoutesText}</p>
                   </div>
                 </article>
 
@@ -1168,11 +1639,8 @@ function App() {
                     💾
                   </span>
                   <div>
-                    <strong>Прогресс сохраняется</strong>
-                    <p>
-                      Аккаунт хранит открытые уровни, статистику маршрутов, монеты и
-                      выбранные аксессуары.
-                    </p>
+                    <strong>{copy.auth.benefitProgressTitle}</strong>
+                    <p>{copy.auth.benefitProgressText}</p>
                   </div>
                 </article>
 
@@ -1181,11 +1649,8 @@ function App() {
                     🏆
                   </span>
                   <div>
-                    <strong>Награды и рейтинг</strong>
-                    <p>
-                      Получайте монеты за правильные ответы, открывайте предметы в
-                      магазине и поднимайтесь в таблице лидеров.
-                    </p>
+                    <strong>{copy.auth.benefitRewardsTitle}</strong>
+                    <p>{copy.auth.benefitRewardsText}</p>
                   </div>
                 </article>
               </div>
@@ -1196,10 +1661,10 @@ function App() {
             <div className="auth-form-card__header">
               <div>
                 <p className="auth-kicker">
-                  {authMode === "register" ? "Новый аккаунт" : "С возвращением"}
+                  {authMode === "register" ? copy.auth.registerKicker : copy.auth.welcomeBack}
                 </p>
                 <h3>
-                  {authMode === "register" ? "Создать аккаунт" : "Войти в аккаунт"}
+                  {authMode === "register" ? copy.auth.registerTitle : copy.auth.loginTitle}
                 </h3>
               </div>
               <span className="auth-form-card__emoji" aria-hidden="true">
@@ -1208,9 +1673,7 @@ function App() {
             </div>
 
             <p className="auth-form-card__text">
-              {authMode === "register"
-                ? "Создайте профиль, чтобы сохранять прогресс, монеты и купленные аксессуары. Уникальный тег будет назначен автоматически."
-                : "Войдите, чтобы продолжить с сохраненного места. Можно использовать имя пользователя или логин в формате имя#тег."}
+              {authMode === "register" ? copy.auth.registerText : copy.auth.loginText}
             </p>
 
             <form className="auth-form" onSubmit={handleAuthSubmit}>
@@ -1222,7 +1685,7 @@ function App() {
                   }`}
                   onClick={() => setAuthMode("register")}
                 >
-                  Регистрация
+                  {copy.auth.registerTab}
                 </button>
                 <button
                   type="button"
@@ -1231,43 +1694,49 @@ function App() {
                   }`}
                   onClick={() => setAuthMode("login")}
                 >
-                  Вход
+                  {copy.auth.loginTab}
                 </button>
               </div>
 
               <label className="field field--auth">
                 <span>
-                  {authMode === "login" ? "Имя пользователя или имя#тег" : "Имя пользователя"}
+                  {authMode === "login"
+                    ? copy.auth.usernameLabelLogin
+                    : copy.auth.usernameLabelRegister}
                 </span>
                 <input
                   value={authForm.username}
                   onChange={(event) =>
                     setAuthForm((prev) => ({ ...prev, username: event.target.value }))
                   }
-                  placeholder={authMode === "login" ? "frog_coder#1234" : "frog_coder"}
+                  placeholder={
+                    authMode === "login"
+                      ? copy.auth.usernamePlaceholderLogin
+                      : copy.auth.usernamePlaceholderRegister
+                  }
                 />
               </label>
 
               <label className="field field--auth">
-                <span>Пароль</span>
+                <span>{copy.auth.passwordLabel}</span>
                 <input
                   type="password"
                   value={authForm.password}
                   onChange={(event) =>
                     setAuthForm((prev) => ({ ...prev, password: event.target.value }))
                   }
-                  placeholder="Минимум 6 символов"
+                  placeholder={copy.auth.passwordPlaceholder}
                 />
               </label>
 
               <button className="button button--primary" type="submit">
-                {authMode === "login" ? "Войти" : "Создать аккаунт"}
+                {authMode === "login" ? copy.auth.submitLogin : copy.auth.submitRegister}
               </button>
             </form>
 
             <div className="auth-footnote">
-              <span>Языки: Python и JavaScript</span>
-              <span>Уровни сложности: Easy / Medium / Hard</span>
+              <span>{copy.auth.footnoteLanguages}</span>
+              <span>{copy.auth.footnoteDifficulty}</span>
             </div>
           </div>
         </div>
@@ -1283,49 +1752,45 @@ function App() {
       <section className="card">
         <div className="scene-layout">
           <div className="scene-copy">
-            <div className="card-badge">Главное меню</div>
-            <h2>Выберите язык и откройте нужный маршрут</h2>
-            <p className="card-text">
-              Каждый маршрут разбит по сложности и уровням. Прогресс, монеты и результаты
-              сохраняются автоматически в профиле.
-            </p>
+            <div className="card-badge">{copy.menu.badge}</div>
+            <h2>{copy.menu.title}</h2>
+            <p className="card-text">{copy.menu.intro}</p>
 
             <div className="stats-row">
               <article className="stat-box">
-                <span className="stat-label">Языков</span>
+                <span className="stat-label">{copy.menu.languagesLabel}</span>
                 <strong>{languageOptions.length}</strong>
               </article>
 
               <article className="stat-box">
-                <span className="stat-label">Маршрутов</span>
+                <span className="stat-label">{copy.menu.routesLabel}</span>
                 <strong>{routes.length}</strong>
               </article>
 
               <article className="stat-box">
-                <span className="stat-label">Монет в кошельке</span>
+                <span className="stat-label">{copy.menu.walletLabel}</span>
                 <strong>{currentCoins}</strong>
               </article>
             </div>
           </div>
 
-          <div className="scene-art" style={MENU_SCENE_STYLE}>
+          <div className="scene-art" style={menuSceneStyle}>
             <div className="frog-bubble">
-              Выберите язык программирования, затем откройте нужную сложность и
-              продолжайте с последнего доступного уровня.
+              {copy.menu.bubble}
             </div>
 
             <div className="preview-panel">
-              <h3>Что доступно</h3>
-              <p>
-                Маршруты, уровни, подсказки, жизни, магазин и таблица лидеров уже
-                доступны в приложении.
-              </p>
+              <h3>{copy.menu.previewTitle}</h3>
+              <p>{copy.menu.previewText}</p>
             </div>
 
             <FrogFamily />
 
             <p className="scene-caption">
-              Текущий маршрут: {currentRoute ? getRouteTitle(currentRoute) : "не выбран"}
+              {copy.menu.currentRoutePrefix}{" "}
+              {currentRoute
+                ? getRouteTitle(currentRoute, copy.common.routeNotSelected)
+                : copy.common.routeNotSelected}
             </p>
           </div>
         </div>
@@ -1343,10 +1808,12 @@ function App() {
                 setView("difficulty");
               }}
             >
-              <span className="route-card__eyebrow">Язык</span>
+              <span className="route-card__eyebrow">{copy.settings.languageLabel}</span>
               <strong>{language}</strong>
               <span>
-                {routes.filter((route) => route.language === language).length} маршрута
+                {copy.menu.routeCount(
+                  routes.filter((route) => route.language === language).length,
+                )}
               </span>
             </button>
           ))}
@@ -1354,21 +1821,24 @@ function App() {
 
         <div className="actions-row">
           <button className="button button--ghost" onClick={openAccount}>
-            Аккаунт
+            {copy.menu.account}
+          </button>
+          <button className="button button--ghost" onClick={() => void openDailyChallenge()}>
+            {copy.menu.daily}
           </button>
           <button className="button button--ghost" onClick={() => void openShop()}>
-            Открыть магазин
+            {copy.menu.shop}
           </button>
           <button className="button button--ghost" onClick={() => void openLeaderboard()}>
-            Таблица лидеров
+            {copy.menu.leaderboard}
           </button>
           <button
             className="button button--ghost button--danger"
             onClick={() => void handleResetAllProgress()}
           >
-            Сбросить весь прогресс
+            {copy.menu.resetAll}
           </button>
-          <span className="account-chip">Прохождений текущего маршрута: {currentRuns}</span>
+          <span className="account-chip">{copy.menu.currentRuns(currentRuns)}</span>
         </div>
       </section>
     );
@@ -1388,12 +1858,9 @@ function App() {
 
     return (
       <section className="card">
-        <div className="card-badge">Сложность</div>
-        <h2>{selectedLanguage}: выберите уровень сложности</h2>
-        <p className="card-text">
-          Для каждой сложности доступен отдельный маршрут с собственным прогрессом,
-          статистикой и набором уровней.
-        </p>
+        <div className="card-badge">{copy.difficulty.badge}</div>
+        <h2>{copy.difficulty.title(selectedLanguage)}</h2>
+        <p className="card-text">{copy.difficulty.intro}</p>
 
         <div className="route-grid">
           {difficultyOptions.map((route) => {
@@ -1403,12 +1870,15 @@ function App() {
               <article key={route.topic} className="route-card route-card--panel">
                 <span className="route-card__eyebrow">{route.language}</span>
                 <strong>{route.difficulty_label}</strong>
-                <span>{route.questions_total} заданий</span>
-                <span>{getRouteContentHint(route)}</span>
+                <span>
+                  {route.questions_total}{" "}
+                  {copy.common.tasksLabel}
+                </span>
+                <span>{getRouteContentHint(route, SOURCE_LOCALE)}</span>
                 <span>
                   {savedProgress
-                    ? `Открыт уровень ${savedProgress.unlocked_level_index + 1}`
-                    : "Еще не запускался"}
+                    ? copy.difficulty.openedLevel(savedProgress.unlocked_level_index + 1)
+                    : copy.difficulty.notStarted}
                 </span>
 
                 <button
@@ -1416,7 +1886,7 @@ function App() {
                   type="button"
                   onClick={() => void chooseDifficulty(route)}
                 >
-                  {isActiveRoute ? "Обновить маршрут" : "Открыть маршрут"}
+                  {isActiveRoute ? copy.difficulty.refreshRoute : copy.difficulty.openRoute}
                 </button>
               </article>
             );
@@ -1425,25 +1895,29 @@ function App() {
 
         {activeRoute && activeProgress && hasActiveQuestions && (
           <>
-            <div className="card-badge">Уровни маршрута</div>
-            <h3>{getRouteTitle(activeRoute)}</h3>
+            <div className="card-badge">{copy.difficulty.levelsBadge}</div>
+            <h3>{getRouteTitle(activeRoute, copy.common.routeNotSelected)}</h3>
             <p className="card-text">
-              Продолжайте с последней точки или запускайте любой доступный уровень.
-              Сейчас активны уровень {activeProgress.current_level_index + 1} и задание{" "}
-              {activeProgress.current_task_index + 1}.
+              {copy.difficulty.currentLevel(
+                activeProgress.current_level_index + 1,
+                activeProgress.current_task_index + 1,
+                activeProgress.tasks_per_level,
+              )}
             </p>
 
             <div className="map-summary">
               <span className="account-chip">
-                Открыт уровень: {activeProgress.unlocked_level_index + 1}
+                {copy.difficulty.unlockedLevel(activeProgress.unlocked_level_index + 1)}
               </span>
               <span className="account-chip">
-                Завершенных забегов: {activeProgress.completed_runs}
+                {copy.difficulty.completedRuns}: {activeProgress.completed_runs}
               </span>
               <span className="account-chip">
-                Лучший счет: {activeProgress.best_score}
+                {copy.difficulty.bestScore}: {activeProgress.best_score}
               </span>
-              <span className="account-chip">Монеты: {user?.coins ?? 0}</span>
+              <span className="account-chip">
+                {copy.difficulty.coins}: {user?.coins ?? 0}
+              </span>
             </div>
 
             <div className="level-map">
@@ -1457,24 +1931,29 @@ function App() {
                     : "map-node--done"
                   : "map-node--locked";
                 const nodeText = isCurrent
-                  ? `Задание ${activeProgress.current_task_index + 1}/${activeProgress.tasks_per_level}`
+                  ? copy.difficulty.currentTask(
+                      activeProgress.current_task_index + 1,
+                      activeProgress.tasks_per_level,
+                    )
                   : isUnlocked
                     ? isReplayable
-                      ? "Доступен повтор"
-                      : "Доступен"
-                    : "Недоступен";
+                      ? copy.difficulty.repeatAvailable
+                      : copy.difficulty.available
+                    : copy.difficulty.unavailable;
                 const buttonText =
                   levelIndex === activeProgress.current_level_index &&
                   activeProgress.current_task_index > 0
-                    ? "Продолжить"
+                    ? copy.difficulty.continueLevel
                     : isReplayable
-                      ? "Пройти заново"
-                      : "Начать";
+                      ? copy.difficulty.replayLevel
+                      : copy.difficulty.startLevel;
 
                 return (
                   <article key={levelIndex} className={`map-node ${statusClass}`}>
                     <div className="map-node__circle">{levelIndex + 1}</div>
-                    <strong>Уровень {levelIndex + 1}</strong>
+                    <strong>
+                      {copy.quiz.level(levelIndex + 1)}
+                    </strong>
                     <span>{nodeText}</span>
 
                     {isUnlocked ? (
@@ -1487,7 +1966,7 @@ function App() {
                       </button>
                     ) : (
                       <button type="button" className="button button--ghost" disabled>
-                        Недоступен
+                        {copy.difficulty.unavailable}
                       </button>
                     )}
                   </article>
@@ -1497,13 +1976,13 @@ function App() {
 
             <div className="actions-row">
               <button className="button button--ghost" onClick={() => setView("menu")}>
-                К языкам
+                {copy.difficulty.backToLanguages}
               </button>
               <button
                 className="button button--ghost"
                 onClick={() => void resetCurrentRoute(false)}
               >
-                Сбросить прогресс маршрута
+                {copy.difficulty.resetRouteProgress}
               </button>
             </div>
           </>
@@ -1511,22 +1990,22 @@ function App() {
 
         {activeRoute && activeProgress && !hasActiveQuestions && (
           <>
-            <div className="card-badge">Уровни маршрута</div>
-            <h3>{getRouteTitle(activeRoute)}</h3>
+            <div className="card-badge">{copy.difficulty.levelsBadge}</div>
+            <h3>{getRouteTitle(activeRoute, copy.common.routeNotSelected)}</h3>
             <div className="empty-state">
-              Для этого маршрута пока нет заданий. Контент для маршрута еще не добавлен.
+              {copy.difficulty.noTasksText}
             </div>
 
             <div className="actions-row">
               <button className="button button--ghost" onClick={() => setView("menu")}>
-                К языкам
+                {copy.difficulty.backToLanguages}
               </button>
               {user?.is_admin && (
                 <button
                   className="button button--primary"
                   onClick={() => void openAdmin(activeRoute.topic)}
                 >
-                  Открыть админку
+                  {copy.difficulty.openAdmin}
                 </button>
               )}
             </div>
@@ -1536,7 +2015,7 @@ function App() {
         {!activeRoute && (
           <div className="actions-row">
             <button className="button button--ghost" onClick={() => setView("menu")}>
-              К языкам
+              {copy.difficulty.backToLanguages}
             </button>
           </div>
         )}
@@ -1556,36 +2035,46 @@ function App() {
     const questionHint =
       currentQuestion.hint.trim().length > 0
         ? currentQuestion.hint
-        : currentQuestion.placeholder?.trim() || "Подсказка для этого задания пока не добавлена.";
+        : currentQuestion.placeholder?.trim() || copy.quiz.hintUnavailable;
     const actionLabel =
       feedback === null
-        ? "Проверить ответ"
+        ? copy.quiz.checkAnswer
         : feedback.quiz_completed
-          ? "К результатам"
+          ? copy.quiz.toResults
           : feedbackAction === "level-reset"
-            ? "Начать уровень заново"
+            ? copy.quiz.restartLevel
             : feedbackAction === "advance"
-              ? "Следующее задание"
-              : "Повторить попытку";
+              ? copy.quiz.nextTask
+              : copy.quiz.retry;
+    const timedOut = feedback !== null && timedOutQuestionId === currentQuestion.id;
 
     return (
       <section className="card card--quiz">
         <div className="quiz-topbar">
           <div>
-            <p className="eyebrow">{getRouteTitle(currentRoute)}</p>
-            <h2>Уровень {currentQuestion.level_index + 1}</h2>
+            <p className="eyebrow">{getRouteTitle(currentRoute, copy.common.routeNotSelected)}</p>
+            <h2>{copy.quiz.level(currentQuestion.level_index + 1)}</h2>
           </div>
 
           <div className="quiz-meta">
+            <span>{copy.quiz.task(currentQuestion.task_index + 1, progress.tasks_per_level)}</span>
+            <span>{copy.quiz.progressOpened(progress.current_score)}</span>
             <span>
-              Задание {currentQuestion.task_index + 1} / {progress.tasks_per_level}
+              {timerEnabled ? (
+                <>
+                  {copy.quiz.onTime}
+                  <span translate="no">{timeLeft}</span>
+                  {copy.common.secondsShort}
+                </>
+              ) : (
+                copy.quiz.timerOff
+              )}
             </span>
-            <span>Пройдено задач: {progress.current_score}</span>
           </div>
         </div>
 
         <div className="quiz-strip">
-          <div className="task-dots" aria-label="Прогресс внутри уровня">
+          <div className="task-dots" aria-label={copy.quiz.progressAria}>
             {currentLevelQuestions.map((question) => {
               const isCurrent = question.id === currentQuestion.id;
               const isDone = question.task_index < currentQuestion.task_index;
@@ -1606,7 +2095,7 @@ function App() {
             })}
           </div>
 
-          <div className="hearts-bar" aria-label="Сердца">
+          <div className="hearts-bar" aria-label={copy.quiz.heartsAria}>
             {heartsLeft.map((isAlive, index) => (
               <span key={index} className={isAlive ? "heart heart--alive" : "heart"}>
                 {isAlive ? "❤️" : "🖤"}
@@ -1616,18 +2105,48 @@ function App() {
         </div>
 
         <div className="question-box">
-          <p className="question-number">Задание маршрута</p>
+          <p className="question-number">{copy.quiz.routeTask}</p>
           <h3>{currentQuestion.prompt}</h3>
         </div>
 
         <div className="hint-panel">
-          <button
-            className="button button--ghost"
-            type="button"
-            onClick={() => setShowHint((prev) => !prev)}
-          >
-            {showHint ? "Скрыть подсказку" : "Показать подсказку"}
-          </button>
+          <div className="actions-row actions-row--compact">
+            <button
+              className="button button--ghost"
+              type="button"
+              onClick={() => setShowHint((prev) => !prev)}
+            >
+              {showHint ? copy.quiz.hideHint : copy.quiz.showHint}
+            </button>
+
+            <button
+              className="button button--ghost"
+              type="button"
+              onClick={() => setTimerEnabled((prev) => !prev)}
+            >
+              {timerEnabled ? copy.quiz.disableTimer : copy.quiz.enableTimer(QUESTION_TIMER_SECONDS)}
+            </button>
+          </div>
+
+          {timerEnabled && (
+            <div className="timer-panel">
+              <div className="timer-panel__header">
+                <strong>{copy.quiz.timedMode}</strong>
+                <span>
+                  {timeLeft} {copy.common.secondsShort}
+                </span>
+              </div>
+              <div className="timer-panel__track" aria-hidden="true">
+                <div
+                  className="timer-panel__fill"
+                  style={{
+                    width: `${Math.max(0, (timeLeft / QUESTION_TIMER_SECONDS) * 100)}%`,
+                  }}
+                />
+              </div>
+              <p>{copy.quiz.timerAutoSubmit}</p>
+            </div>
+          )}
 
           {showHint && <p>{questionHint}</p>}
         </div>
@@ -1641,9 +2160,7 @@ function App() {
                 "option-card",
                 isSelected ? "option-card--selected" : "",
                 feedback && isCorrectOption ? "option-card--correct" : "",
-                feedback && isSelected && !feedback.is_correct
-                  ? "option-card--wrong"
-                  : "",
+                feedback && isSelected && !feedback.is_correct ? "option-card--wrong" : "",
               ]
                 .filter(Boolean)
                 .join(" ");
@@ -1664,18 +2181,17 @@ function App() {
           </div>
         ) : (
           <label className="field">
-            <span>Ответ</span>
-            <input
-              value={typedAnswer}
-              placeholder={currentQuestion.placeholder ?? "Введите ответ"}
-              onChange={(event) => setTypedAnswer(event.target.value)}
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect="off"
-              spellCheck={false}
-              translate="no"
-              disabled={feedback !== null}
-            />
+            <span>{copy.quiz.answer}</span>
+              <input
+                value={typedAnswer}
+                placeholder={currentQuestion.placeholder ?? copy.quiz.answer}
+                onChange={(event) => setTypedAnswer(event.target.value)}
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                disabled={feedback !== null}
+              />
           </label>
         )}
 
@@ -1687,13 +2203,19 @@ function App() {
           >
             <strong>
               {feedback.is_correct
-                ? `Правильно. +${feedback.coins_awarded} монет.`
-                : feedbackAction === "level-reset"
-                  ? "Попытки закончились. Уровень начнется заново."
-                  : `Неверно. Осталось жизней: ${hearts}.`}
+                ? copy.quiz.answerCorrect(feedback.coins_awarded)
+                : timedOut && feedbackAction === "level-reset"
+                  ? copy.quiz.levelResetTimeOut
+                  : timedOut
+                    ? copy.quiz.timeOutHearts(hearts)
+                    : feedbackAction === "level-reset"
+                      ? copy.quiz.levelReset
+                      : copy.quiz.answerWrong(hearts)}
             </strong>
             {!feedback.is_correct && (
-              <span>Правильный ответ: {feedback.correct_answers.join(" или ")}</span>
+              <span>
+                {copy.quiz.correctAnswerPrefix} {feedback.correct_answers.join(` ${copy.common.or} `)}
+              </span>
             )}
           </div>
         )}
@@ -1708,7 +2230,7 @@ function App() {
           </button>
 
           <button className="button button--ghost" onClick={() => setView("difficulty")}>
-            К уровням
+            {copy.quiz.backToLevels}
           </button>
         </div>
       </section>
@@ -1724,15 +2246,13 @@ function App() {
       <section className="card">
         <div className="scene-layout">
           <div className="scene-copy">
-            <div className="card-badge">Результаты</div>
-            <h2>Маршрут завершен: {roundResult.routeTitle}</h2>
+            <div className="card-badge">{copy.result.badge}</div>
+            <h2>{copy.result.title(roundResult.routeTitle)}</h2>
             <p className="score-line">
-              Пройдено <strong>{roundResult.finalScore}</strong> из{" "}
-              <strong>{roundResult.totalQuestions}</strong> заданий.
+              {copy.result.scoreLine(roundResult.finalScore, roundResult.totalQuestions)}
             </p>
             <p className="card-text">
-              Лучший результат на этом маршруте: <strong>{roundResult.bestScore}</strong>.
-              Всего завершенных прохождений: <strong>{roundResult.completedRuns}</strong>.
+              {copy.result.bestScore(roundResult.bestScore)} {copy.result.completedRuns(roundResult.completedRuns)}
             </p>
 
             <div className="result-ring">
@@ -1744,40 +2264,33 @@ function App() {
                 className="button button--primary"
                 onClick={() => void resetCurrentRoute(true)}
               >
-                Играть снова
+                {copy.result.playAgain}
               </button>
               <button className="button button--ghost" onClick={() => setView("difficulty")}>
-                К уровням
+                {copy.result.toLevels}
               </button>
               <button
                 className="button button--ghost"
                 onClick={() => void openLeaderboard(currentRoute.topic)}
               >
-                Лидеры
+                {copy.result.leaders}
               </button>
             </div>
           </div>
 
-          <div className="scene-art" style={RESULT_SCENE_STYLE}>
+          <div className="scene-art" style={resultSceneStyle}>
             <div className="frog-bubble frog-bubble--result">
-              Финиш! Результат сохранен в профиле, а лучший рекорд учтен в таблице
-              лидеров.
+              {copy.result.bubble}
             </div>
 
             <div className="preview-panel">
-              <h3>Что сохраняется после финиша</h3>
-              <p>
-                Прогресс по маршрутам, завершенные прохождения, монеты и купленные
-                предметы сохраняются в аккаунте автоматически.
-              </p>
+              <h3>{copy.result.previewTitle}</h3>
+              <p>{copy.result.previewText}</p>
             </div>
 
             <FrogFamily />
 
-            <p className="scene-caption">
-              Можно пройти маршрут еще раз, улучшить рекорд или выбрать новый
-              маршрут.
-            </p>
+            <p className="scene-caption">{copy.result.caption}</p>
           </div>
         </div>
       </section>
@@ -1800,7 +2313,9 @@ function App() {
       ? routeProgressCache[trackedRoute.topic] ??
         (progress?.topic === trackedRoute.topic ? progress : null)
       : null;
-    const routeLabel = trackedRoute ? getRouteTitle(trackedRoute) : "Маршрут не выбран";
+    const routeLabel = trackedRoute
+      ? getRouteTitle(trackedRoute, copy.common.routeNotSelected)
+      : copy.common.routeNotSelected;
     const currentDisplayName = accountForm.displayName.trim() || user.username;
     const loginPreview = user.tag ? `${currentDisplayName}#${user.tag}` : currentDisplayName;
     const openedQuestions = trackedProgress?.opened_questions ?? 0;
@@ -1812,7 +2327,7 @@ function App() {
     return (
       <section className="card">
         <div className="account-shell">
-          <div className="account-hero" style={MENU_SCENE_STYLE}>
+          <div className="account-hero" style={menuSceneStyle}>
             <div className="account-hero__content">
               <div className="account-hero__topline">
                 <FrogAvatar
@@ -1823,22 +2338,25 @@ function App() {
                 />
 
                 <div>
-                  <p className="account-kicker">Профиль</p>
-                  <h2>{loginPreview}</h2>
-                  <p className="account-subtitle">
-                    Здесь можно обновить имя пользователя и пароль. Уникальный тег
-                    сохраняется и остается частью логина.
-                  </p>
+                  <p className="account-kicker">{copy.account.badge}</p>
+                  <h2 translate="no">{loginPreview}</h2>
+                  <p className="account-subtitle">{copy.account.subtitle}</p>
                 </div>
               </div>
 
               <div className="account-rankline">
-                <span className="account-chip">Тег: #{user.tag ?? "----"}</span>
-                <span className="account-chip">Маршрут: {routeLabel}</span>
                 <span className="account-chip">
-                  Образ: {user.active_skin_icon} {user.active_skin_label}
+                  {copy.account.tagLabel}: #{user.tag ?? "----"}
                 </span>
-                <span className="account-chip">Монеты: {user.coins}</span>
+                <span className="account-chip">
+                  {copy.account.routeLabel}: {routeLabel}
+                </span>
+                <span className="account-chip">
+                  {copy.account.skinLabel}: {user.active_skin_icon} {user.active_skin_label}
+                </span>
+                <span className="account-chip">
+                  {copy.account.coinsLabel}: {user.coins}
+                </span>
               </div>
             </div>
           </div>
@@ -1847,21 +2365,23 @@ function App() {
             <div className="account-panel">
               <div className="account-panel__header">
                 <div>
-                  <p className="account-panel__eyebrow">Аккаунт</p>
-                  <h3>Настройки профиля</h3>
+                  <p className="account-panel__eyebrow">{copy.account.badge}</p>
+                  <h3>{copy.account.settingsTitle}</h3>
                 </div>
-                <span className="account-progress-badge">Логин: {loginPreview}</span>
+                <span className="account-progress-badge">
+                  {copy.account.loginBadge(loginPreview)}
+                </span>
               </div>
 
               <form className="account-form" onSubmit={handleAccountSubmit}>
                 <label className="field">
-                  <span>Имя пользователя</span>
-                  <input
-                    value={accountForm.displayName}
-                    onChange={(event) =>
-                      setAccountForm((prev) => ({
-                        ...prev,
-                        displayName: event.target.value,
+                  <span>{copy.account.usernameLabel}</span>
+                <input
+                  value={accountForm.displayName}
+                  onChange={(event) =>
+                    setAccountForm((prev) => ({
+                      ...prev,
+                      displayName: event.target.value,
                       }))
                     }
                     autoCapitalize="none"
@@ -1874,23 +2394,20 @@ function App() {
 
                 <div className="account-form__meta">
                   <div className="account-readonly">
-                    <span>Тег</span>
+                    <span>{copy.account.tagLabel}</span>
                     <strong>#{user.tag ?? "----"}</strong>
                   </div>
                   <div className="account-readonly">
-                    <span>Логин для следующих входов</span>
-                    <strong>{loginPreview}</strong>
+                    <span>{copy.account.loginLabel}</span>
+                    <strong translate="no">{loginPreview}</strong>
                   </div>
                 </div>
 
-                <p className="account-form__hint">
-                  Тег закреплен за профилем. При смене имени обновится и полный логин
-                  формата `имя#тег`.
-                </p>
+                <p className="account-form__hint">{copy.account.tagHint}</p>
 
                 <div className="account-form__grid">
                   <label className="field">
-                    <span>Текущий пароль</span>
+                    <span>{copy.account.currentPassword}</span>
                     <input
                       type="password"
                       value={accountForm.currentPassword}
@@ -1901,29 +2418,29 @@ function App() {
                         }))
                       }
                       autoComplete="current-password"
-                      placeholder="Требуется только при смене пароля"
+                      placeholder={copy.account.currentPasswordPlaceholder}
                     />
                   </label>
-
-                  <label className="field">
-                    <span>Новый пароль</span>
-                    <input
-                      type="password"
-                      value={accountForm.newPassword}
-                      onChange={(event) =>
-                        setAccountForm((prev) => ({
-                          ...prev,
-                          newPassword: event.target.value,
-                        }))
-                      }
-                      autoComplete="new-password"
-                      placeholder="Минимум 6 символов"
-                    />
-                  </label>
-                </div>
 
                 <label className="field">
-                  <span>Повторите новый пароль</span>
+                  <span>{copy.account.newPassword}</span>
+                  <input
+                    type="password"
+                    value={accountForm.newPassword}
+                    onChange={(event) =>
+                      setAccountForm((prev) => ({
+                          ...prev,
+                          newPassword: event.target.value,
+                      }))
+                    }
+                    autoComplete="new-password"
+                    placeholder={copy.auth.passwordPlaceholder}
+                  />
+                </label>
+              </div>
+
+                <label className="field">
+                  <span>{copy.account.repeatNewPassword}</span>
                   <input
                     type="password"
                     value={accountForm.confirmPassword}
@@ -1934,24 +2451,22 @@ function App() {
                       }))
                     }
                     autoComplete="new-password"
-                    placeholder="Повторите новый пароль"
+                    placeholder={copy.account.repeatNewPassword}
                   />
                 </label>
 
-                <p className="account-form__hint">
-                  Если пароль менять не нужно, оставьте поля пустыми.
-                </p>
+                <p className="account-form__hint">{copy.account.passwordHint}</p>
 
                 <div className="account-actions">
                   <button className="button button--primary" type="submit">
-                    Сохранить изменения
+                    {copy.account.saveChanges}
                   </button>
                   <button
                     className="button button--ghost"
                     type="button"
                     onClick={() => resetAccountForm(user)}
                   >
-                    Сбросить изменения
+                    {copy.account.resetChanges}
                   </button>
                 </div>
               </form>
@@ -1961,11 +2476,8 @@ function App() {
                   🔐
                 </span>
                 <div>
-                  <strong>Вход после смены имени</strong>
-                  <p>
-                    После сохранения используйте новый логин <strong>{loginPreview}</strong>.
-                    Текущая сессия при этом не прервется.
-                  </p>
+                  <strong>{copy.account.loginAfterChangeTitle}</strong>
+                  <p>{copy.account.loginAfterChangeText(loginPreview)}</p>
                 </div>
               </div>
 
@@ -1975,16 +2487,18 @@ function App() {
               <div className="account-panel">
                 <div className="account-panel__header">
                   <div>
-                    <p className="account-panel__eyebrow">Прогресс</p>
-                    <h3>Статистика маршрута</h3>
+                    <p className="account-panel__eyebrow">{copy.account.progressTitle}</p>
+                    <h3>{copy.account.progressTitle}</h3>
                   </div>
                   <span className="account-progress-badge">
-                    {trackedRoute ? "Выбран маршрут" : "Маршрут не выбран"}
+                    {trackedRoute
+                      ? copy.account.progressBadgeSelected
+                      : copy.account.progressBadgeEmpty}
                   </span>
                 </div>
 
                 <label className="field">
-                  <span>Маршрут для прогресса</span>
+                  <span>{copy.account.routeForProgress}</span>
                   <select
                     value={trackedRoute?.topic ?? ""}
                     onChange={(event) => setAccountRouteTopic(event.target.value)}
@@ -2002,8 +2516,11 @@ function App() {
                     <strong>{openedQuestions}</strong>
                     <span>
                       {trackedProgress
-                        ? `из ${trackedProgress.total_questions} заданий открыто`
-                        : "прогресс по этому маршруту пока не зафиксирован"}
+                        ? copy.account.openedTasks(
+                            openedQuestions,
+                            trackedProgress.total_questions,
+                          )
+                        : copy.account.progressEmpty}
                     </span>
                   </div>
 
@@ -2017,15 +2534,15 @@ function App() {
 
                 <div className="account-metrics">
                   <article className="account-metric">
-                    <span className="account-metric__label">Лучший счет</span>
+                    <span className="account-metric__label">{copy.account.bestScore}</span>
                     <strong>{trackedProgress?.best_score ?? 0}</strong>
                   </article>
                   <article className="account-metric">
-                    <span className="account-metric__label">Забеги</span>
+                    <span className="account-metric__label">{copy.account.runs}</span>
                     <strong>{trackedProgress?.completed_runs ?? 0}</strong>
                   </article>
                   <article className="account-metric">
-                    <span className="account-metric__label">Открыт уровень</span>
+                    <span className="account-metric__label">{copy.account.unlockedLevel}</span>
                     <strong>{trackedProgress ? trackedProgress.unlocked_level_index + 1 : 1}</strong>
                   </article>
                 </div>
@@ -2035,10 +2552,16 @@ function App() {
                     className="button button--primary"
                     onClick={() => void openAccountRoute(trackedRoute)}
                   >
-                    Открыть маршрут
+                    {copy.account.openRoute}
+                  </button>
+                  <button
+                    className="button button--ghost"
+                    onClick={() => void handleDownloadProgressReport()}
+                  >
+                    {copy.account.downloadPdf}
                   </button>
                   <button className="button button--ghost" onClick={() => void openShop()}>
-                    Магазин
+                    {copy.account.shop}
                   </button>
                 </div>
               </div>
@@ -2046,15 +2569,15 @@ function App() {
               <div className="account-panel">
                 <div className="account-panel__header">
                   <div>
-                    <p className="account-panel__eyebrow">Промокод</p>
-                    <h3>Бонус для аккаунта</h3>
+                    <p className="account-panel__eyebrow">{copy.account.promoBadge}</p>
+                    <h3>{copy.account.promoTitle}</h3>
                   </div>
-                  <span className="account-progress-badge">ПРОМОКОД</span>
+                  <span className="account-progress-badge">{copy.account.promoBadge}</span>
                 </div>
 
                 <form className="account-form" onSubmit={handlePromoSubmit}>
                   <label className="field">
-                    <span>Промокод</span>
+                    <span>{copy.account.promoCode}</span>
                     <input
                       value={promoCode}
                       onChange={(event) => setPromoCode(event.target.value.toUpperCase())}
@@ -2066,14 +2589,10 @@ function App() {
                     />
                   </label>
 
-                  <p className="account-form__hint">
-                    Промокод <strong>FROGBEST</strong> открывает все уровни и добавляет
-                    <strong> 1000 </strong> монет. Активировать его можно только один раз
-                    для каждого аккаунта.
-                  </p>
+                  <p className="account-form__hint">{copy.account.promoHint}</p>
 
                   <button className="button button--primary" type="submit">
-                    Активировать промокод
+                    {copy.account.activatePromo}
                   </button>
                 </form>
               </div>
@@ -2084,33 +2603,210 @@ function App() {
     );
   }
 
-  function renderLeaderboardView() {
-    const routeLabel = currentRoute ? getRouteTitle(currentRoute) : "маршрут не выбран";
-    const scopeText =
-      leaderboardScope === "global"
-        ? "Статистика по всем игрокам."
-        : `Статистика для маршрута ${routeLabel}.`;
+  function renderDailyView() {
+    if (!dailyChallenge) {
+      return null;
+    }
+
+    const result = dailyResult ?? dailyChallenge.result;
+    const question = dailyChallenge.question;
+    const currentDailyAnswer =
+      question.type === "choice" ? dailySelectedOption : dailyTypedAnswer;
+    const canSubmitDaily =
+      !dailyChallenge.already_answered &&
+      !dailyResult &&
+      currentDailyAnswer.trim().length > 0 &&
+      busyLabel.length === 0;
 
     return (
       <section className="card">
-        <div className="card-badge">Таблица лидеров</div>
-        <h2>Таблица лидеров: {leaderboardMetricLabel}</h2>
+        <div className="scene-layout">
+          <div className="scene-copy">
+            <div className="card-badge">{copy.daily.badge}</div>
+            <h2>
+              {copy.daily.titlePrefix} {dailyChallenge.challenge_date}
+            </h2>
+            <p className="card-text">{copy.daily.subtitle(dailyChallenge.reward_coins)}</p>
+
+            <div className="map-summary">
+              <span className="account-chip">
+                {copy.daily.dateLabel}: {dailyChallenge.challenge_date}
+              </span>
+              <span className="account-chip">
+                {copy.daily.statusLabel}:{" "}
+                {dailyChallenge.already_answered
+                  ? copy.daily.answeredLabel
+                  : copy.daily.pendingLabel}
+              </span>
+              <span className="account-chip">
+                {copy.account.coinsLabel}: {user?.coins ?? 0}
+              </span>
+            </div>
+
+            <div className="question-box">
+              <p className="question-number">{copy.daily.questionLabel}</p>
+              <h3>{question.prompt}</h3>
+            </div>
+
+            {question.type === "choice" ? (
+              <div className="options-grid">
+                {question.options.map((option) => {
+                  const isSelected = dailySelectedOption === option;
+                  const isCorrectOption = result?.correct_answers.includes(option);
+                  const classes = [
+                    "option-card",
+                    isSelected ? "option-card--selected" : "",
+                    result && isCorrectOption ? "option-card--correct" : "",
+                    result && isSelected && !result.is_correct ? "option-card--wrong" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
+
+                  return (
+                    <button
+                      key={option}
+                      type="button"
+                      className={classes}
+                      disabled={dailyChallenge.already_answered}
+                      onClick={() => setDailySelectedOption(option)}
+                    >
+                      <span className="option-marker" />
+                      <span>{option}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <label className="field">
+                <span>{copy.quiz.answer}</span>
+                <input
+                  value={dailyTypedAnswer}
+                  placeholder={question.placeholder ?? copy.daily.submitHint}
+                  onChange={(event) => setDailyTypedAnswer(event.target.value)}
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  disabled={dailyChallenge.already_answered}
+                />
+              </label>
+            )}
+
+            {result && (
+              <div
+                className={`status-box ${
+                  result.is_correct ? "status-box--success" : "status-box--warning"
+                }`}
+              >
+                <strong>
+                  {result.is_correct
+                    ? copy.daily.answerCorrect(result.reward_coins)
+                    : copy.daily.answerSavedWrong}
+                </strong>
+                <span>
+                  {copy.daily.correctAnswerPrefix} {result.correct_answers.join(` ${copy.common.or} `)}
+                </span>
+                <span>
+                  {copy.daily.explanationPrefix} {result.explanation}
+                </span>
+                <span>
+                  {copy.daily.answeredAtPrefix} {formatDate(result.answered_at, uiLocale)}
+                </span>
+              </div>
+            )}
+
+            {!dailyChallenge.already_answered && (
+              <div className="actions-row">
+                <button
+                  className="button button--primary"
+                  onClick={() => void handleDailyChallengeSubmit()}
+                  disabled={!canSubmitDaily}
+                >
+                  {copy.daily.answerButton}
+                </button>
+                <button className="button button--ghost" onClick={() => setView("menu")}>
+                  {copy.daily.laterButton}
+                </button>
+              </div>
+            )}
+
+            {dailyChallenge.already_answered && (
+              <div className="actions-row">
+                <button className="button button--primary" onClick={() => setView("menu")}>
+                  {copy.daily.menuButton}
+                </button>
+                <button className="button button--ghost" onClick={openAccount}>
+                  {copy.daily.accountButton}
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="scene-art" style={authSceneStyle}>
+            <div className="frog-bubble">
+              {copy.daily.bubble}
+            </div>
+
+            <div className="preview-panel">
+              <h3>{copy.daily.leaderboardTitle}</h3>
+              {dailyChallenge.leaderboard.length === 0 ? (
+                <p>{copy.daily.leaderboardEmpty}</p>
+              ) : (
+                <ol className="leaderboard-mini">
+                  {dailyChallenge.leaderboard.map((entry) => (
+                    <li key={`${entry.rank}-${entry.full_username}`}>
+                      <em>#{entry.rank}</em>
+                      <span translate="no">{entry.full_username}</span>
+                      <strong className="leaderboard-mini__time">
+                        {formatTime(entry.answered_at, uiLocale)}
+                      </strong>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+
+            <div className="daily-note">
+              <strong>{copy.daily.howItWorksTitle}</strong>
+              <p>{copy.daily.howItWorksText}</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  function renderLeaderboardView() {
+    const routeLabel = currentRoute
+      ? getRouteTitle(currentRoute, copy.common.routeNotSelected)
+      : copy.common.routeNotSelected;
+    const scopeText =
+      leaderboardScope === "global"
+        ? copy.leaderboard.globalScope
+        : copy.leaderboard.routeScope(routeLabel);
+
+    return (
+      <section className="card">
+        <div className="card-badge">{copy.leaderboard.badge}</div>
+        <h2>
+          {copy.leaderboard.titlePrefix} {leaderboardMetricLabel}
+        </h2>
         <p className="card-text">{scopeText}</p>
 
         <div className="leaderboard-toolbar">
           <div className="map-summary">
             <span className="account-chip">
-              {leaderboardScope === "global" ? "Все маршруты" : routeLabel}
+              {leaderboardScope === "global" ? copy.leaderboard.allRoutes : routeLabel}
             </span>
             <span className="account-chip">
-              Монеты: {user?.coins ?? 0}
+              {copy.leaderboard.coins}: {user?.coins ?? 0}
             </span>
           </div>
         </div>
 
         {leaderboard.length === 0 ? (
           <div className="empty-state">
-            По этой метрике пока нет данных.
+            {copy.leaderboard.emptyState}
           </div>
         ) : (
           <div className="leaderboard-list">
@@ -2121,8 +2817,10 @@ function App() {
               >
                 <div className="leaderboard-row__rank">#{entry.rank}</div>
                 <div className="leaderboard-row__meta">
-                  <strong>{getLeaderboardHandle(entry)}</strong>
-                  <span>Последний финиш: {formatDate(entry.last_played_at)}</span>
+                  <strong translate="no">{getLeaderboardHandle(entry)}</strong>
+                  <span>
+                    {copy.leaderboard.lastPlayed} {formatDate(entry.last_played_at, uiLocale)}
+                  </span>
                 </div>
                 <div className="leaderboard-row__score">
                   <strong>{leaderboardMetricLabel}: {entry.metric_value}</strong>
@@ -2137,10 +2835,10 @@ function App() {
             className="button button--primary"
             onClick={() => setView(currentRoute ? "difficulty" : "menu")}
           >
-            Назад
+            {copy.leaderboard.back}
           </button>
           <button className="button button--ghost" onClick={() => void refreshLeaderboard()}>
-            Обновить
+            {copy.leaderboard.refresh}
           </button>
         </div>
       </section>
@@ -2154,26 +2852,23 @@ function App() {
       <section className="card">
         <div className="scene-layout">
           <div className="scene-copy">
-            <div className="card-badge">Магазин</div>
-            <h2>Аксессуары и предметы профиля</h2>
-            <p className="card-text">
-              Покупайте предметы за монеты, которые начисляются за правильные ответы
-              в заданиях.
-            </p>
+            <div className="card-badge">{copy.shop.badge}</div>
+            <h2>{copy.shop.title}</h2>
+            <p className="card-text">{copy.shop.intro}</p>
 
             <div className="stats-row">
               <article className="stat-box">
-                <span className="stat-label">Монеты</span>
+                <span className="stat-label">{copy.shop.coinsLabel}</span>
                 <strong>{user?.coins ?? 0}</strong>
               </article>
 
               <article className="stat-box">
-                <span className="stat-label">Открыто предметов</span>
+                <span className="stat-label">{copy.shop.ownedLabel}</span>
                 <strong>{ownedCount}</strong>
               </article>
 
               <article className="stat-box">
-                <span className="stat-label">Активный образ</span>
+                <span className="stat-label">{copy.shop.skinLabel}</span>
                 <strong>
                   {user?.active_skin_icon} {user?.active_skin_label}
                 </strong>
@@ -2195,17 +2890,14 @@ function App() {
             </div>
           </div>
 
-          <div className="scene-art" style={MENU_SCENE_STYLE}>
+          <div className="scene-art" style={menuSceneStyle}>
             <div className="frog-bubble">
-              Активный предмет меняет внешний вид лягушки в профиле и в верхней панели.
+              {copy.shop.activeItem}
             </div>
 
             <div className="preview-panel">
-              <h3>Как зарабатываются монеты</h3>
-              <p>
-                За каждый правильный ответ начисляется `+10` монет. Ошибки не
-                списывают уже накопленный баланс.
-              </p>
+              <h3>{copy.shop.howEarnTitle}</h3>
+              <p>{copy.shop.howEarnText}</p>
             </div>
 
             <FrogFamily />
@@ -2215,10 +2907,10 @@ function App() {
         <div className="shop-grid">
           {shopItems.map((item) => {
             const actionLabel = item.active
-              ? "Используется"
+              ? copy.common.used
               : item.owned
-                ? "Выбрать"
-                : `Купить за ${item.price}`;
+                ? copy.common.use
+                : copy.shop.buyFor(item.price);
 
             return (
               <article key={item.id} className={`shop-card ${item.active ? "shop-card--active" : ""}`}>
@@ -2229,7 +2921,9 @@ function App() {
                   <div>
                     <strong>{item.name}</strong>
                     <span>
-                      {item.is_default ? "Базовый предмет" : `${item.price} монет`}
+                      {item.is_default
+                        ? copy.shop.baseItem
+                        : `${item.price} ${copy.account.coinsLabel}`}
                     </span>
                   </div>
                 </div>
@@ -2238,7 +2932,7 @@ function App() {
 
                 <div className="shop-card__meta">
                   <span className="account-chip">
-                    {item.active ? "Используется" : item.owned ? "Куплен" : "Не куплен"}
+                    {item.active ? copy.common.used : item.owned ? copy.common.bought : copy.common.notBought}
                   </span>
                 </div>
 
@@ -2257,10 +2951,10 @@ function App() {
 
         <div className="actions-row">
           <button className="button button--primary" onClick={() => setView("menu")}>
-            В меню
+            {copy.shop.menu}
           </button>
           <button className="button button--ghost" onClick={() => setView(currentRoute ? "difficulty" : "menu")}>
-            К уровням
+            {copy.shop.levels}
           </button>
         </div>
       </section>
@@ -2274,30 +2968,28 @@ function App() {
 
     return (
       <section className="card">
-        <div className="card-badge">Управление контентом</div>
-        <h2>Вопросы и маршруты</h2>
-        <p className="card-text">
-          Добавляйте и редактируйте задания для конкретных языков, сложностей и уровней.
-        </p>
+        <div className="card-badge">{copy.admin.badge}</div>
+        <h2>{copy.admin.title}</h2>
+        <p className="card-text">{copy.admin.intro}</p>
 
         <div className="admin-grid">
           <div className="admin-sidebar">
             <form className="admin-form" onSubmit={handleSaveQuestion}>
               <div className="admin-form__header">
-                <h3>{editingQuestionId ? "Редактирование вопроса" : "Новый вопрос"}</h3>
+                <h3>{editingQuestionId ? copy.admin.editQuestionTitle : copy.admin.newQuestionTitle}</h3>
                 {editingQuestionId && (
                   <button
                     type="button"
                     className="button button--ghost"
                     onClick={() => resetDraftForm()}
                   >
-                    Сбросить форму
+                    {copy.admin.resetForm}
                   </button>
                 )}
               </div>
 
               <label className="field">
-                <span>Маршрут</span>
+                <span>{copy.admin.routeLabel}</span>
                 <select
                   value={draft.topic}
                   onChange={(event) => void handleAdminRouteChange(event.target.value)}
@@ -2311,7 +3003,7 @@ function App() {
               </label>
 
               <label className="field">
-                <span>Тип вопроса</span>
+                <span>{copy.admin.questionType}</span>
                 <select
                   value={draft.type}
                   onChange={(event) =>
@@ -2321,13 +3013,13 @@ function App() {
                     }))
                   }
                 >
-                  <option value="choice">choice</option>
-                  <option value="input">input</option>
+                  <option value="choice">{copy.common.choiceType}</option>
+                  <option value="input">{copy.common.inputType}</option>
                 </select>
               </label>
 
               <label className="field">
-                <span>Порядок в маршруте</span>
+                <span>{copy.admin.orderIndex}</span>
                 <input
                   value={draft.order_index}
                   onChange={(event) =>
@@ -2337,7 +3029,7 @@ function App() {
               </label>
 
               <label className="field">
-                <span>Текст вопроса</span>
+                <span>{copy.admin.questionText}</span>
                 <textarea
                   value={draft.prompt}
                   onChange={(event) =>
@@ -2347,7 +3039,7 @@ function App() {
               </label>
 
               <label className="field">
-                <span>Подсказка / объяснение</span>
+                <span>{copy.admin.hintExplanation}</span>
                 <textarea
                   value={draft.explanation}
                   onChange={(event) =>
@@ -2357,7 +3049,7 @@ function App() {
               </label>
 
               <label className="field">
-                <span>Плейсхолдер для текстового ответа</span>
+                <span>{copy.admin.placeholder}</span>
                 <input
                   value={draft.placeholder}
                   onChange={(event) =>
@@ -2368,7 +3060,7 @@ function App() {
 
               {draft.type === "choice" && (
                 <label className="field">
-                  <span>Варианты ответа, по одному в строке</span>
+                  <span>{copy.admin.optionsLabel}</span>
                   <textarea
                     value={draft.options_text}
                     onChange={(event) =>
@@ -2381,8 +3073,8 @@ function App() {
               <label className="field">
                 <span>
                   {draft.type === "choice"
-                    ? "Правильный ответ"
-                    : "Допустимые ответы, по одному в строке"}
+                    ? copy.admin.correctAnswerChoiceLabel
+                    : copy.admin.correctAnswerInputLabel}
                 </span>
                 <textarea
                   value={draft.answers_text}
@@ -2393,7 +3085,105 @@ function App() {
               </label>
 
               <button className="button button--primary" type="submit">
-                {editingQuestionId ? "Сохранить вопрос" : "Добавить вопрос"}
+                {editingQuestionId ? copy.admin.saveQuestion : copy.admin.addQuestion}
+              </button>
+            </form>
+
+            <form className="admin-form" onSubmit={handleSavePromo}>
+              <div className="admin-form__header">
+                <h3>{editingPromoCode ? copy.admin.editPromoTitle : copy.admin.newPromoTitle}</h3>
+                {editingPromoCode && (
+                  <button
+                    type="button"
+                    className="button button--ghost"
+                    onClick={() => resetPromoDraft()}
+                  >
+                    {copy.admin.resetForm}
+                  </button>
+                )}
+              </div>
+
+              <label className="field">
+                <span>{copy.admin.codeLabel}</span>
+                <input
+                  value={promoDraft.code}
+                  onChange={(event) =>
+                    setPromoDraft((prev) => ({
+                      ...prev,
+                      code: event.target.value.toUpperCase(),
+                    }))
+                  }
+                  autoCapitalize="characters"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  placeholder="SWAMP200"
+                  disabled={editingPromoCode !== null}
+                />
+              </label>
+
+              <label className="field">
+                <span>{copy.admin.descriptionLabel}</span>
+                <textarea
+                  value={promoDraft.description}
+                  onChange={(event) =>
+                    setPromoDraft((prev) => ({
+                      ...prev,
+                      description: event.target.value,
+                    }))
+                  }
+                  placeholder={copy.admin.descriptionPlaceholder}
+                />
+              </label>
+
+              <label className="field">
+                <span>{copy.admin.rewardLabel}</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="5000"
+                  value={promoDraft.reward_coins}
+                  onChange={(event) =>
+                    setPromoDraft((prev) => ({
+                      ...prev,
+                      reward_coins: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+
+              <div className="checkbox-row">
+                <label className="checkbox-chip checkbox-chip--toggle">
+                  <span>{copy.admin.unlockAllLabel}</span>
+                  <input
+                    type="checkbox"
+                    checked={promoDraft.unlock_all_levels}
+                    onChange={(event) =>
+                      setPromoDraft((prev) => ({
+                        ...prev,
+                        unlock_all_levels: event.target.checked,
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="checkbox-chip checkbox-chip--toggle">
+                  <span>{copy.admin.promoActiveLabel}</span>
+                  <input
+                    type="checkbox"
+                    checked={promoDraft.is_active}
+                    onChange={(event) =>
+                      setPromoDraft((prev) => ({
+                        ...prev,
+                        is_active: event.target.checked,
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+
+              <button className="button button--primary" type="submit">
+                {editingPromoCode ? copy.admin.savePromo : copy.admin.addPromo}
               </button>
             </form>
           </div>
@@ -2401,23 +3191,29 @@ function App() {
           <div className="admin-list-panel">
             <div className="admin-list__header">
               <div>
-                <h3>{currentRoute ? getRouteTitle(currentRoute) : "Список вопросов"}</h3>
+                <h3>
+                  {currentRoute
+                    ? getRouteTitle(currentRoute, copy.common.routeNotSelected)
+                    : copy.admin.questionsTitle}
+                </h3>
                 <p className="card-text">
                   {currentRoute
-                    ? `Показаны только вопросы маршрута ${getRouteTitle(currentRoute)}.`
-                    : "Выбери маршрут слева, чтобы увидеть его вопросы."}
+                    ? copy.admin.routeOnlyQuestions(
+                        getRouteTitle(currentRoute, copy.common.routeNotSelected),
+                      )
+                    : copy.admin.chooseRouteLeft}
                 </p>
               </div>
               {currentRoute && (
                 <span className="account-chip">
-                  Вопросов: {adminQuestions.length}
+                  {copy.admin.questionCount(adminQuestions.length)}
                 </span>
               )}
             </div>
 
             <div className="admin-list">
               {adminQuestions.length === 0 ? (
-                <div className="empty-state">Для этого маршрута пока нет вопросов.</div>
+                <div className="empty-state">{copy.admin.noQuestions}</div>
               ) : (
                 adminQuestions.map((question) => (
                   <article
@@ -2432,7 +3228,7 @@ function App() {
                       onClick={() => setSelectedAdminQuestionId(question.id)}
                     >
                       <span className="pill">
-                        Уровень {question.level_index + 1} • Задание {question.task_index + 1}
+                        {copy.admin.levelTask(question.level_index + 1, question.task_index + 1)}
                       </span>
                       <strong className="admin-question-row__title">{question.prompt}</strong>
                     </button>
@@ -2443,14 +3239,14 @@ function App() {
                         type="button"
                         onClick={() => beginEditQuestion(question)}
                       >
-                        Редактировать
+                        {copy.admin.edit}
                       </button>
                       <button
                         className="button button--ghost button--danger"
                         type="button"
                         onClick={() => void handleDeleteQuestion(question.id)}
                       >
-                        Удалить
+                        {copy.admin.delete}
                       </button>
                     </div>
                   </article>
@@ -2463,8 +3259,10 @@ function App() {
                 <div className="admin-question-detail__header">
                   <div>
                     <span className="pill">
-                      Уровень {selectedAdminQuestion.level_index + 1} • Задание{" "}
-                      {selectedAdminQuestion.task_index + 1}
+                      {copy.admin.levelTask(
+                        selectedAdminQuestion.level_index + 1,
+                        selectedAdminQuestion.task_index + 1,
+                      )}
                     </span>
                     <h3>{selectedAdminQuestion.prompt}</h3>
                   </div>
@@ -2474,7 +3272,7 @@ function App() {
 
                 {selectedAdminQuestion.type === "choice" && (
                   <div className="list-block">
-                    <strong>Варианты ответа:</strong>
+                    <strong>{copy.admin.optionsLabel}</strong>
                     <ul>
                       {selectedAdminQuestion.options.map((option) => (
                         <li key={option}>{option}</li>
@@ -2484,7 +3282,11 @@ function App() {
                 )}
 
                 <div className="list-block">
-                  <strong>Правильные ответы:</strong>
+                  <strong>
+                    {selectedAdminQuestion.type === "choice"
+                      ? copy.admin.correctAnswerChoiceLabel
+                      : copy.admin.correctAnswerInputLabel}
+                  </strong>
                   <ul>
                     {selectedAdminQuestion.correct_answers.map((answer) => (
                       <li key={answer}>{answer}</li>
@@ -2493,6 +3295,73 @@ function App() {
                 </div>
               </article>
             )}
+
+            <article className="admin-question-detail">
+              <div className="admin-question-detail__header">
+                <div>
+                  <span className="pill">{copy.admin.promoCatalogTitle}</span>
+                  <h3>{copy.admin.promoCatalogTitle}</h3>
+                </div>
+                <span className="account-chip">{copy.admin.promoCount(adminPromos.length)}</span>
+              </div>
+
+              {adminPromos.length === 0 ? (
+                <div className="empty-state">{copy.admin.promoListEmpty}</div>
+              ) : (
+                <div className="admin-list">
+                  {adminPromos.map((promo) => (
+                    <article
+                      key={promo.code}
+                      className={`admin-question-row ${
+                        editingPromoCode === promo.code ? "admin-question-row--selected" : ""
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        className="admin-question-row__select"
+                        onClick={() => beginEditPromo(promo)}
+                      >
+                        <span className="pill" translate="no">
+                          {promo.code}
+                        </span>
+                        <strong className="admin-question-row__title">{promo.description}</strong>
+                        <span>
+                          +{promo.reward_coins} {copy.account.coinsLabel} •{" "}
+                          {promo.unlock_all_levels
+                            ? copy.admin.promoUnlockAll
+                            : copy.admin.promoNoUnlock}
+                        </span>
+                        <span>
+                          {copy.admin.statusLabel}:{" "}
+                          {promo.is_active
+                            ? copy.admin.promoStatusActive
+                            : copy.admin.promoStatusInactive}{" "}
+                          • {copy.admin.activationsLabel}:{" "}
+                          {promo.redemptions_count}
+                        </span>
+                      </button>
+
+                      <div className="actions-row actions-row--compact">
+                        <button
+                          className="button button--ghost"
+                          type="button"
+                          onClick={() => beginEditPromo(promo)}
+                        >
+                          {copy.admin.edit}
+                        </button>
+                        <button
+                          className="button button--ghost button--danger"
+                          type="button"
+                          onClick={() => void handleDeletePromo(promo.code)}
+                        >
+                          {copy.admin.delete}
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </article>
           </div>
         </div>
       </section>
@@ -2504,10 +3373,10 @@ function App() {
       <div className="bg-orb bg-orb--one" />
       <div className="bg-orb bg-orb--two" />
 
-      <main className="panel">
+      <main className="panel" ref={appPanelRef}>
         <section className="hero-copy">
-          <p className="eyebrow">{APP_TITLE} • Практика по программированию</p>
-          <h1>Маршруты, уровни и прогресс в одном приложении</h1>
+          <p className="eyebrow">{copy.heroEyebrow}</p>
+          <h1>{copy.heroTitle}</h1>
         </section>
 
         {renderTopNav()}
@@ -2517,11 +3386,14 @@ function App() {
         {view === "menu" && renderMenuView()}
         {view === "difficulty" && renderDifficultyView()}
         {view === "quiz" && renderQuizView()}
+        {view === "daily" && renderDailyView()}
         {view === "shop" && renderShopView()}
         {view === "account" && renderAccountView()}
         {view === "leaderboard" && renderLeaderboardView()}
         {view === "admin" && renderAdminView()}
         {view === "result" && renderResultView()}
+
+        {renderSettingsBar()}
       </main>
     </div>
   );

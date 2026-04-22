@@ -1,8 +1,29 @@
 services:
+  translator:
+    image: libretranslate/libretranslate:latest
+    user: "0:0"
+    environment:
+      LT_HOST: 0.0.0.0
+      LT_PORT: 5000
+      LT_THREADS: 1
+      LT_LOAD_ONLY: ru,en,zh
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - translator_models:/home/libretranslate/.local:rw
+    healthcheck:
+      test: ["CMD-SHELL", "./venv/bin/python scripts/healthcheck.py"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    depends_on:
+      translator:
+        condition: service_healthy
     environment:
       FROGGY_ADMIN_USERNAME: ${FROGGY_ADMIN_USERNAME:-frog_admin}
       FROGGY_ADMIN_PASSWORD: ${FROGGY_ADMIN_PASSWORD:?FROGGY_ADMIN_PASSWORD is required}
@@ -10,6 +31,9 @@ services:
       FROGGY_COOKIE_SECURE: ${FROGGY_COOKIE_SECURE:-false}
       FROGGY_COOKIE_SAMESITE: ${FROGGY_COOKIE_SAMESITE:-lax}
       FROGGY_DB_PATH: /app/data/froggy_coder.db
+      FROGGY_TRANSLATION_API_BASE_URL: ${FROGGY_TRANSLATION_API_BASE_URL:-http://translator:5000}
+      FROGGY_TRANSLATION_API_KEY: ${FROGGY_TRANSLATION_API_KEY:-}
+      FROGGY_TRANSLATION_TIMEOUT_SECONDS: ${FROGGY_TRANSLATION_TIMEOUT_SECONDS:-10}
     ports:
       - "8000:8000"
     volumes:
@@ -26,3 +50,4 @@ services:
 
 volumes:
   froggy_data:
+  translator_models:

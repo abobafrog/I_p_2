@@ -92,6 +92,15 @@ class RouteListResponse(BaseModel):
     items: List[RouteOut]
 
 
+class TranslationBatchIn(BaseModel):
+    texts: List[str] = Field(default_factory=list)
+    locale: str = Field(default="ru", min_length=2, max_length=5)
+
+
+class TranslationBatchOut(BaseModel):
+    texts: List[str]
+
+
 class SubmitAnswerIn(BaseModel):
     topic: str = Field(..., min_length=1, max_length=50)
     question_id: int
@@ -163,6 +172,63 @@ class PromoRedeemResponse(BaseModel):
     user: UserOut
     progresses: List[ProgressOut]
     message: str
+
+
+class PromoCodeIn(BaseModel):
+    code: str = Field(..., min_length=3, max_length=40)
+    description: str = Field(..., min_length=3, max_length=200)
+    reward_coins: int = Field(default=0, ge=0, le=5000)
+    unlock_all_levels: bool = False
+    is_active: bool = True
+
+
+class PromoCodeOut(BaseModel):
+    code: str
+    description: str
+    reward_coins: int
+    unlock_all_levels: bool
+    is_active: bool
+    redemptions_count: int
+
+
+class PromoCodeListResponse(BaseModel):
+    items: List[PromoCodeOut]
+
+
+class DailyChallengeEntryOut(BaseModel):
+    rank: int
+    username: str
+    tag: Optional[str] = None
+    full_username: str
+    is_correct: bool
+    answered_at: Optional[str] = None
+
+
+class DailyChallengeResultOut(BaseModel):
+    is_correct: bool
+    correct_answers: List[str]
+    explanation: str
+    reward_coins: int
+    answered_at: str
+
+
+class DailyChallengeResponse(BaseModel):
+    challenge_date: str
+    question: QuestionOut
+    reward_coins: int
+    already_answered: bool
+    result: Optional[DailyChallengeResultOut] = None
+    leaderboard: List[DailyChallengeEntryOut]
+
+
+class DailyChallengeSubmitIn(BaseModel):
+    answer: str = Field(..., min_length=1, max_length=500)
+
+
+class DailyChallengeSubmitResponse(DailyChallengeResultOut):
+    challenge_date: str
+    user: UserOut
+    leaderboard: List[DailyChallengeEntryOut]
 
 
 class AdminQuestionIn(BaseModel):

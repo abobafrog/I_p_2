@@ -49,7 +49,7 @@ LEADERBOARD_METRICS = {
     },
     "coins": {
         "label": "Монеты",
-        "scope": "global",
+        "scope": "route",
     },
 }
 
