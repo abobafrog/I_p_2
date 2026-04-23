@@ -1,5 +1,7 @@
+import re
 import sys
 from importlib import import_module
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -41,8 +43,9 @@ def client(tmp_path, monkeypatch):
 
 
 def csrf_headers(client: TestClient) -> dict[str, str]:
+    token = getattr(client, "_csrf_token", None) or client.cookies.get("froggy_csrf", "")
     return {
-        "X-CSRF-Token": client.cookies.get("froggy_csrf", ""),
+        "X-CSRF-Token": token,
     }
 
 
@@ -52,12 +55,14 @@ def login_admin(client: TestClient):
         json={"username": "frog_admin", "password": "test-admin-secret"},
     )
     assert response.status_code == 200
+    setattr(client, "_csrf_token", response.json()["csrf_token"])
     return response
 
 
 def logout_current_session(client: TestClient):
     response = client.post("/api/auth/logout", headers=csrf_headers(client))
     assert response.status_code == 204
+    setattr(client, "_csrf_token", None)
     return response
 
 
@@ -67,7 +72,9 @@ def register_user(client: TestClient, username: str, password: str = "super-secr
         json={"username": username, "password": password},
     )
     assert response.status_code == 201
-    return response.json()
+    payload = response.json()
+    setattr(client, "_csrf_token", payload["csrf_token"])
+    return payload
 
 
 def get_correct_answer(question_id: int, question_type: str) -> str:
@@ -111,16 +118,19 @@ def test_register_sets_cookie_session_and_restores_it(client: TestClient):
     payload = response.json()
     assert "token" not in payload
     assert payload["user"]["full_username"].startswith("frog_student#")
-    assert payload["csrf_token"] == client.cookies.get("froggy_csrf")
+    assert payload["csrf_token"]
+    assert client.cookies.get("froggy_csrf") is None
 
     set_cookie_header = response.headers.get("set-cookie", "")
     assert "HttpOnly" in set_cookie_header
     assert "SameSite=lax" in set_cookie_header
     assert client.cookies.get("froggy_session")
+    assert "froggy_csrf" not in set_cookie_header
 
     session_response = client.get("/api/auth/session")
     assert session_response.status_code == 200
     assert session_response.json()["user"]["full_username"] == payload["user"]["full_username"]
+    assert session_response.json()["csrf_token"] == payload["csrf_token"]
 
 
 def test_register_rejects_short_password_with_russian_message(client: TestClient):
@@ -137,10 +147,12 @@ def test_register_rejects_short_password_with_russian_message(client: TestClient
 
 
 def test_mutating_endpoints_require_csrf(client: TestClient):
-    client.post(
+    register_response = client.post(
         "/api/auth/register",
         json={"username": "frog_player", "password": "super-secret"},
     )
+    assert register_response.status_code == 201
+    setattr(client, "_csrf_token", register_response.json()["csrf_token"])
 
     missing_csrf = client.post("/api/game/reset-all")
     assert missing_csrf.status_code == 403
@@ -317,6 +329,22 @@ def test_leaderboard_coins_filters_by_topic(client: TestClient):
     assert python_handle not in javascript_handles
 
 
+def test_partial_progress_keeps_best_score_above_zero_after_reset(client: TestClient):
+    register_user(client, "partial_score_player")
+
+    answer_response = submit_correct_answer_for_topic(client, "python-easy")
+    assert answer_response["next_progress"]["current_score"] == 1
+    assert answer_response["next_progress"]["best_score"] == 1
+
+    reset_response = client.post(
+        "/api/game/reset-level",
+        json={"topic": "python-easy"},
+        headers=csrf_headers(client),
+    )
+    assert reset_response.status_code == 200
+    assert reset_response.json()["best_score"] == 1
+
+
 def test_locale_parameter_translates_bootstrap_and_routes(client: TestClient, monkeypatch):
     register_user(client, "locale_player")
 
@@ -444,6 +472,15 @@ def test_local_translation_base_url_disables_public_fallback(monkeypatch):
     assert translation_module._candidate_translation_urls() == [
         "http://translator:5000/translate"
     ]
+
+
+def test_translation_has_no_public_fallback_without_configuration(monkeypatch):
+    translation_module = import_module("backend.translation")
+
+    monkeypatch.setattr(translation_module, "get_translation_api_base_url", lambda: "")
+    monkeypatch.setattr(translation_module, "get_translation_api_key", lambda: "")
+
+    assert translation_module._candidate_translation_urls() == []
 
 
 def test_admin_translation_endpoints_honor_locale(client: TestClient, monkeypatch):
@@ -618,10 +655,38 @@ def test_daily_challenge_and_progress_report(client: TestClient):
     assert repeated_payload["result"]["reward_coins"] == 25
     assert "Подсказка из desktop-версии:" not in repeated_payload["result"]["explanation"]
 
-    report_response = client.get("/api/auth/progress-report")
+    report_response = client.get("/api/auth/progress-report", params={"locale": "zh"})
     assert report_response.status_code == 200
     assert report_response.headers["content-type"].startswith("application/pdf")
+    assert re.search(
+        r'attachment; filename="froggy-progress-report-zh-\d+\.pdf"',
+        report_response.headers["content-disposition"],
+    )
     assert report_response.content.startswith(b"%PDF")
+    media_box = re.search(rb"/MediaBox\s*\[\s*0\s+0\s+([0-9.]+)\s+([0-9.]+)\s*\]", report_response.content)
+    assert media_box is not None
+    assert float(media_box.group(1)) > float(media_box.group(2))
+    assert b"STSong-Light" in report_response.content
+
+
+def test_progress_report_locale_copy_and_font_are_localized(client: TestClient):
+    app_module = import_module("backend.main")
+    copy = app_module.get_progress_report_copy("zh")
+
+    assert copy["title"] == "Froggy Coder 进度报告"
+    assert copy["summary_labels"] == ["路线", "已打开", "运行次数", "最佳"]
+    assert copy["difficulty_labels"]["hard"] == "困难"
+    assert copy["page_label_template"] == "第 {page} 页"
+    assert app_module.get_pdf_font_name("zh") == "STSong-Light"
+    assert app_module.get_progress_report_copy("ru")["subtitle_timezone"] == "(МСК)"
+
+
+def test_progress_report_timestamp_format_is_compact():
+    app_module = import_module("backend.main")
+
+    assert app_module.format_report_timestamp(
+        datetime(2026, 4, 23, 7, 8, 9)
+    ) == "07:08:09 23.04.2026"
 
 
 def test_daily_challenge_leaderboard_keeps_only_correct_answers_and_orders_by_speed(

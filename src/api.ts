@@ -219,8 +219,8 @@ export function getAllProgress() {
   return request<ProgressListResponse>("/game/progress");
 }
 
-export function downloadProgressReport() {
-  return requestBlob("/auth/progress-report");
+export function downloadProgressReport(locale: AppLocale = "ru") {
+  return requestBlob(`/auth/progress-report?${buildLocaleQuery(locale)}`);
 }
 
 export function getBootstrap(topic: string, locale: AppLocale = "ru") {

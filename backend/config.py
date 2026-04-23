@@ -92,8 +92,8 @@ def get_translation_api_key() -> str:
 
 
 def get_translation_timeout_seconds() -> float:
-    raw_value = os.getenv("FROGGY_TRANSLATION_TIMEOUT_SECONDS", "10").strip()
+    raw_value = os.getenv("FROGGY_TRANSLATION_TIMEOUT_SECONDS", "5").strip()
     try:
         return max(1.0, float(raw_value))
     except ValueError:
-        return 10.0
+        return 5.0

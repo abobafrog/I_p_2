@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import threading
 from typing import Any, Dict, List, Sequence
 
 import httpx
@@ -13,11 +15,8 @@ from backend.config import (
 
 
 SUPPORTED_LOCALES = {"ru": "ru", "en": "en", "zh": "zh"}
-PUBLIC_TRANSLATION_BASE_URLS = (
-    "https://translate.argosopentech.com",
-    "https://libretranslate.de",
-)
 _TRANSLATION_CACHE: dict[tuple[str, str], str] = {}
+_TRANSLATION_CACHE_LOCK = threading.Lock()
 
 
 def normalize_locale(locale: str | None) -> str:
@@ -70,24 +69,17 @@ def _candidate_translation_urls() -> List[str]:
     if configured_base_url:
         return [f"{configured_base_url.rstrip('/')}/translate"]
 
-    candidates: List[str] = list(PUBLIC_TRANSLATION_BASE_URLS)
-
     if get_translation_api_key():
-        candidates.append("https://libretranslate.com")
+        return ["https://libretranslate.com/translate"]
 
-    urls: List[str] = []
-    seen: set[str] = set()
-    for base_url in candidates:
-        endpoint = f"{base_url.rstrip('/')}/translate"
-        if endpoint in seen:
-            continue
-        seen.add(endpoint)
-        urls.append(endpoint)
-
-    return urls
+    return []
 
 
-def _translate_batch_with_api(texts: Sequence[str], locale: str) -> List[str]:
+async def _translate_batch_with_api_async(
+    texts: Sequence[str],
+    locale: str,
+    client: httpx.AsyncClient,
+) -> List[str]:
     target_language = SUPPORTED_LOCALES[locale]
     payload: Dict[str, Any] = {
         "q": list(texts),
@@ -100,10 +92,9 @@ def _translate_batch_with_api(texts: Sequence[str], locale: str) -> List[str]:
     if api_key:
         payload["api_key"] = api_key
 
-    last_error: Exception | None = None
     for endpoint in _candidate_translation_urls():
         try:
-            response = httpx.post(
+            response = await client.post(
                 endpoint,
                 json=payload,
                 timeout=get_translation_timeout_seconds(),
@@ -123,18 +114,15 @@ def _translate_batch_with_api(texts: Sequence[str], locale: str) -> List[str]:
                 return [str(item) for item in translated]
 
             raise ValueError("Translation response missing translatedText.")
-        except Exception as exc:  # pragma: no cover - external API fallback
-            last_error = exc
-
-    if last_error is not None:
-        raise last_error
+        except Exception:  # pragma: no cover - external API fallback
+            continue
 
     return list(texts)
 
 
-def translate_texts(texts: Sequence[str], locale: str | None) -> List[str]:
+async def translate_texts_async(texts: Sequence[str], locale: str | None) -> List[str]:
     normalized_locale = normalize_locale(locale)
-    if not texts:
+    if not texts or normalized_locale == "ru":
         return list(texts)
 
     result = list(texts)
@@ -145,7 +133,8 @@ def translate_texts(texts: Sequence[str], locale: str | None) -> List[str]:
             continue
 
         cache_key = (normalized_locale, text)
-        cached = _TRANSLATION_CACHE.get(cache_key)
+        with _TRANSLATION_CACHE_LOCK:
+            cached = _TRANSLATION_CACHE.get(cache_key)
         if cached is not None:
             result[index] = cached
             continue
@@ -157,26 +146,40 @@ def translate_texts(texts: Sequence[str], locale: str | None) -> List[str]:
         return result
 
     translated_pending: List[str] = []
-    for chunk in _chunked(pending_texts, 25):
-        chunk_translated: List[str]
-        chunk_translated_successfully = True
-        try:
-            chunk_translated = _translate_batch_with_api(chunk, normalized_locale)
-        except Exception:
-            chunk_translated_successfully = False
-            chunk_translated = list(chunk)
+    endpoints = _candidate_translation_urls()
+    if not endpoints:
+        return result
 
-        translated_pending.extend(chunk_translated)
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for chunk in _chunked(pending_texts, 25):
+            try:
+                chunk_translated = await _translate_batch_with_api_async(
+                    chunk,
+                    normalized_locale,
+                    client,
+                )
+            except Exception:
+                chunk_translated = list(chunk)
+            else:
+                with _TRANSLATION_CACHE_LOCK:
+                    for source_text, translated_text in zip(chunk, chunk_translated):
+                        _TRANSLATION_CACHE[(normalized_locale, source_text)] = translated_text
 
-        if chunk_translated_successfully:
-            for source_text, translated_text in zip(chunk, chunk_translated):
-                _TRANSLATION_CACHE[(normalized_locale, source_text)] = translated_text
+            translated_pending.extend(chunk_translated)
 
     for source_text, translated_text in zip(pending_texts, translated_pending):
         for index in pending_positions[source_text]:
             result[index] = translated_text
 
     return result
+
+
+def translate_texts(texts: Sequence[str], locale: str | None) -> List[str]:
+    if not texts or normalize_locale(locale) == "ru":
+        return list(texts)
+    if not _candidate_translation_urls():
+        return list(texts)
+    return asyncio.run(translate_texts_async(texts, locale))
 
 
 def translate_text(text: str, locale: str | None) -> str:

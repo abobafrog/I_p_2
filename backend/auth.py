@@ -47,7 +47,7 @@ def create_session_tokens() -> tuple[str, str, str]:
     return session_token, csrf_token, expires_at.isoformat()
 
 
-def set_session_cookies(response: Response, session_token: str, csrf_token: str) -> None:
+def set_session_cookies(response: Response, session_token: str) -> None:
     max_age = SESSION_DAYS * 24 * 60 * 60
     secure = get_cookie_secure()
     samesite = get_cookie_samesite()
@@ -56,15 +56,6 @@ def set_session_cookies(response: Response, session_token: str, csrf_token: str)
         key=SESSION_COOKIE_NAME,
         value=session_token,
         httponly=True,
-        secure=secure,
-        samesite=samesite,
-        max_age=max_age,
-        path="/",
-    )
-    response.set_cookie(
-        key=CSRF_COOKIE_NAME,
-        value=csrf_token,
-        httponly=False,
         secure=secure,
         samesite=samesite,
         max_age=max_age,
@@ -121,14 +112,11 @@ def require_csrf(
     session: Dict = Depends(require_session),
 ) -> Dict:
     header_token = (request.headers.get("X-CSRF-Token") or "").strip()
-    cookie_token = (request.cookies.get(CSRF_COOKIE_NAME) or "").strip()
     session_token = str(session.get("csrf_token") or "").strip()
 
     if (
         not header_token
-        or not cookie_token
         or not session_token
-        or not hmac.compare_digest(header_token, cookie_token)
         or not hmac.compare_digest(header_token, session_token)
     ):
         raise HTTPException(

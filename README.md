@@ -34,7 +34,7 @@ FROGGY_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localh
 FROGGY_COOKIE_SECURE=false
 FROGGY_COOKIE_SAMESITE=lax
 FROGGY_TRANSLATION_API_BASE_URL=http://translator:5000
-FROGGY_TRANSLATION_TIMEOUT_SECONDS=10
+FROGGY_TRANSLATION_TIMEOUT_SECONDS=5
 VITE_API_BASE_URL=/api
 ```
 
@@ -43,9 +43,11 @@ VITE_API_BASE_URL=/api
 - backend больше не использует дефолтный пароль `admin12345`;
 - при старте пароль админа синхронизируется из `.env`, даже если пользователь `frog_admin` уже есть в базе;
 - авторизация работает через `HttpOnly` cookie, а не через `Bearer` в `localStorage`;
+- CSRF-токен возвращается в ответе auth/session и хранится в состоянии frontend, а не дублируется в cookie;
 - все `POST`/`PUT`/`DELETE` защищены CSRF-токеном;
 - CORS задаётся через `FROGGY_ALLOWED_ORIGINS`.
 - перевод вопросов, магазина и части интерфейсных текстов идет через LibreTranslate-compatible API; в Docker по умолчанию поднимается локальный `translator`-контейнер;
+- публичные fallback-серверы перевода отключены: если `FROGGY_TRANSLATION_API_BASE_URL` не задан, backend тихо вернёт исходный текст;
 - при необходимости можно указать свой `FROGGY_TRANSLATION_API_BASE_URL` и `FROGGY_TRANSLATION_API_KEY`.
 
 Если перевод не работает, почти всегда причина одна из двух:
@@ -58,6 +60,7 @@ VITE_API_BASE_URL=/api
 1. Скопируй `.env.example` в `.env`.
 2. Оставь `FROGGY_TRANSLATION_API_BASE_URL=http://translator:5000`, чтобы backend ходил в локальный контейнер.
 3. Если используешь свой сервис, проверь, что URL доступен именно из контейнера `backend`.
+4. Если перевод недоступен, backend вернёт оригинальный текст, не обращаясь к публичным proxy-серверам.
 
 Первый запуск может быть долгим, потому что `translator` скачивает модели.
 Если хочешь свой отдельный LibreTranslate вне этого compose, пропиши в `.env` его реальный адрес.
@@ -139,7 +142,7 @@ npm run dev
 - `POST /api/auth/login` делает то же самое для существующего пользователя;
 - `GET /api/auth/session` восстанавливает состояние текущей сессии;
 - `GET /api/auth/me` возвращает текущего пользователя;
-- `GET /api/auth/progress-report` формирует PDF-отчёт по текущему прогрессу;
+- `GET /api/auth/progress-report?locale=ru|en|zh` формирует локализованный PDF-отчёт по текущему прогрессу;
 - `POST /api/auth/redeem-promo` активирует промокод для аккаунта;
 - `POST /api/auth/logout` удаляет серверную сессию и очищает cookie.
 
@@ -153,7 +156,7 @@ Frontend отправляет запросы с `credentials: "include"` и бо
 - `POST /api/auth/login`
 - `GET /api/auth/session`
 - `GET /api/auth/me`
-- `GET /api/auth/progress-report`
+- `GET /api/auth/progress-report?locale=ru|en|zh`
 - `PUT /api/auth/profile`
 - `POST /api/auth/redeem-promo`
 - `POST /api/auth/logout`
@@ -242,7 +245,7 @@ npm run build
 
 ## Desktop-версия
 
-Старая `pygame`-версия осталась в [game.py](/Users/timofej/Desktop/I_p_2/game.py).
+Старая `pygame`-версия осталась в [game.py](./game.py).
 
 Запуск:
 

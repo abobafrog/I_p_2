@@ -465,9 +465,23 @@ def bootstrap_database(
         ensure_seed_questions(conn)
         seed_default_promo_codes(conn)
         migrate_legacy_promo_redemptions(conn)
+        sync_progress_best_scores(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def sync_progress_best_scores(conn: Connection) -> None:
+    conn.execute(
+        """
+        UPDATE progress
+        SET best_score = CASE
+            WHEN best_score < max_index THEN max_index
+            ELSE best_score
+        END
+        WHERE best_score < max_index
+        """
+    )
 
 
 def ensure_default_admin(
@@ -993,10 +1007,18 @@ def unlock_all_route_levels(conn: Connection, user_id: int) -> None:
             """
             UPDATE progress
             SET max_index = CASE WHEN max_index < ? THEN ? ELSE max_index END,
+                best_score = CASE WHEN best_score < ? THEN ? ELSE best_score END,
                 updated_at = ?
             WHERE id = ?
             """,
-            (total_questions, total_questions, utc_now_iso(), row["id"]),
+            (
+                total_questions,
+                total_questions,
+                total_questions,
+                total_questions,
+                utc_now_iso(),
+                row["id"],
+            ),
         )
 
 
@@ -1826,6 +1848,7 @@ def apply_answer_result(
     next_index = progress_row["current_index"] + 1
     next_score = progress_row["current_score"] + 1
     next_max_index = max(progress_row["max_index"], next_index)
+    next_best_score = max(progress_row["best_score"], next_max_index)
     current_level_index = (
         progress_row["current_index"] // route_shape["tasks_per_level"]
         if route_shape["tasks_per_level"] > 0
@@ -1835,7 +1858,6 @@ def apply_answer_result(
         award_coins(conn, user_id, coins_awarded)
 
     if next_index >= total_questions:
-        best_score = max(progress_row["best_score"], next_score)
         conn.execute(
             """
             UPDATE progress
@@ -1851,7 +1873,7 @@ def apply_answer_result(
             (
                 total_questions,
                 HEARTS_PER_LEVEL,
-                best_score,
+                next_best_score,
                 utc_now_iso(),
                 progress_row["id"],
             ),
@@ -1892,6 +1914,7 @@ def apply_answer_result(
         SET current_index = ?,
             current_score = ?,
             max_index = ?,
+            best_score = ?,
             remaining_hearts = ?,
             updated_at = ?
         WHERE id = ?
@@ -1900,6 +1923,7 @@ def apply_answer_result(
             next_index,
             next_score,
             next_max_index,
+            next_best_score,
             next_remaining_hearts,
             utc_now_iso(),
             progress_row["id"],

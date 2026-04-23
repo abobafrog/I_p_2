@@ -814,11 +814,11 @@ function App() {
     setErrorMessage("");
 
     try {
-      const blob = await downloadProgressReport();
+      const blob = await downloadProgressReport(uiLocale);
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "froggy-progress-report.pdf";
+      link.download = `froggy-progress-report-${uiLocale}-${user.id}.pdf`;
       document.body.append(link);
       link.click();
       link.remove();
